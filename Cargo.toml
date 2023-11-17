@@ -1,12 +1,12 @@
 [package]
-name = "template-rs"
-version = "0.1.6"
+name = "iradix"
+version = "0.0.1"
 edition = "2021"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
-license = "MIT/Apache-2.0"
+repository = "https://github.com/al8n/iradix"
+homepage = "https://github.com/al8n/iradix"
+documentation = "https://docs.rs/iradix"
+description = "A placeholder"
+license = "MPL-2.0"
 rust-version = "1.73"
 
 [[bench]]
@@ -16,12 +16,23 @@ harness = false
 
 [features]
 default = []
+std = ["bytes/default", "serde?/default", "lru/default"]
+serde = ["dep:serde", "bytes/serde"]
 
 [dependencies]
+bytes = { version = "1", default-features = false }
+lru = { version = "0.12", default-features = false }
+indexsort = "0.1"
+crossbeam-channel = { version = "0.5", optional = true }
+
+serde = { version = "1.0", optional = true, default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3"
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 [profile.bench]
 opt-level = 3
