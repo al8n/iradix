@@ -1,11 +1,11 @@
 [package]
-name = "template-rs"
-version = "0.1.6"
+name = "iradix"
+version = "0.0.0"
 edition = "2021"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
+repository = "https://github.com/al8n/iradix"
+homepage = "https://github.com/al8n/iradix"
+documentation = "https://docs.rs/iradix"
+description = "A placeholder"
 license = "MIT/Apache-2.0"
 rust-version = "1.73"
 
@@ -16,6 +16,7 @@ harness = false
 
 [features]
 default = []
+std = []
 
 [dependencies]
 
