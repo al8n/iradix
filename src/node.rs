@@ -121,9 +121,7 @@ impl<T> Clone for Node<T> {
       // Safety:
       // The ptr is always non-null, we just initialized it.
       // And this ptr is only deallocated when the inner is dropped.
-      Self {
-        ptr: shared,
-      }
+      Self { ptr: shared }
     }
   }
 }
@@ -305,7 +303,7 @@ impl<T> Node<T> {
   }
 
   #[inline]
-  pub(super) fn as_ref(&self) -> &Inner<T> { 
+  pub(super) fn as_ref(&self) -> &Inner<T> {
     unsafe { &*self.ptr }
   }
 

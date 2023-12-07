@@ -5,7 +5,6 @@
 #![allow(warnings)]
 #![deny(missing_docs)]
 
-
 use core::num::NonZeroUsize;
 
 use bytes::Bytes;
@@ -144,7 +143,6 @@ pub struct Txn<V, S = lru::DefaultHasher> {
 }
 
 impl<V> Txn<V> {
-
   /// Finalize the transaction and return a new tree. If mutation
   /// tracking is turned on then notifications will also be issued.
   #[cfg(feature = "std")]
@@ -182,7 +180,7 @@ impl<V> Txn<V> {
   }
 }
 
-impl<V> Txn<V> { 
+impl<V> Txn<V> {
   /// Returns a node to be modified, if the current node has already been
   /// modified during the course of the transaction, it is used in-place. Set
   /// `for_leaf_update` to true if you are getting a write node to update the leaf,
@@ -278,19 +276,26 @@ impl<V> Txn<V> {
             nc_ref.edges.insert(prefix, new_child);
             return (nc, old_val);
           }
-          
+
           return (Node::dangling(), old_val);
         }
 
         // Split the node
         let nc = self.write_node(n, false);
-        let mut split_node = Node::from(Inner::new(Bytes::copy_from_slice(&search[..common_prefix]), None, Default::default()));
+        let mut split_node = Node::from(Inner::new(
+          Bytes::copy_from_slice(&search[..common_prefix]),
+          None,
+          Default::default(),
+        ));
         nc.replace_edge(Edge::new(search[0], split_node.clone()));
 
         // Restore the existing child node
         let mod_child = self.write_node(&mut child, false);
         let mod_child_ref = mod_child.as_mut();
-        split_node.add_edge(Edge::new(mod_child_ref.prefix[common_prefix], mod_child.clone()));
+        split_node.add_edge(Edge::new(
+          mod_child_ref.prefix[common_prefix],
+          mod_child.clone(),
+        ));
         mod_child_ref.prefix = mod_child_ref.prefix.slice(common_prefix..);
 
         // Create the new leaf node
@@ -305,9 +310,12 @@ impl<V> Txn<V> {
           split_node.set_leaf(new_leaf);
           return (nc, None);
         }
-        
+
         // Create a new edge for the node
-        split_node.add_edge(Edge::new(search[0], Node::from(Inner::new(search, Some(new_leaf), Default::default()))));
+        split_node.add_edge(Edge::new(
+          search[0],
+          Node::from(Inner::new(search, Some(new_leaf), Default::default())),
+        ));
         (nc, None)
       }
     }
@@ -318,7 +326,7 @@ fn longest_prefix(k1: &[u8], k2: &[u8]) -> usize {
   let max = core::cmp::min(k1.len(), k2.len());
   let mut i = 0;
   while i < max && k1[i] == k2[i] {
-      i += 1;
+    i += 1;
   }
   i
 }
