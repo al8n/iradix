@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+
 use bytes::Bytes;
 
 use super::{
@@ -37,9 +39,19 @@ impl<T> Value<T> {
 }
 
 /// Used to represent a value
+#[derive(Debug)]
 pub(super) struct LeafNode<T> {
   pub(super) key: Bytes,
   pub(super) val: Value<T>,
+}
+
+impl<T> Clone for LeafNode<T> {
+  fn clone(&self) -> Self {
+    Self {
+      key: self.key.clone(),
+      val: self.val.clone(),
+    }
+  }
 }
 
 pub(super) struct Edge<T> {
@@ -88,6 +100,16 @@ impl<T> Inner<T> {
 /// An immutable node in the radix tree
 pub struct Node<T> {
   ptr: *mut Inner<T>,
+}
+
+impl<T: Debug> Debug for Node<T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.debug_struct("Node")
+      .field("leaf", &self.as_ref().leaf)
+      .field("prefix", &self.as_ref().prefix)
+      .field("edges", &self.as_ref().edges)
+      .finish()
+  }
 }
 
 impl<T> PartialEq for Node<T> {
@@ -337,7 +359,13 @@ impl<T> Node<T> {
   }
 
   pub(super) fn set_leaf(&mut self, leaf: LeafNode<T>) {
+    println!("set leaf for key: {:?}", leaf.key.as_ref());
     self.as_mut().leaf = Some(leaf);
+  }
+
+  pub(super) fn clear_leaf(&mut self) {
+    println!("clear leaf for key: {:?}", self.as_ref().leaf.as_ref().unwrap().key.as_ref());
+    self.as_mut().leaf = None;
   }
 
   #[inline]
@@ -381,6 +409,24 @@ impl<T> Node<T> {
 
   pub(super) fn remove_edge(&self, label: u8) -> Option<Node<T>> {
     self.as_mut().edges.remove(&label)
+  }
+
+  pub(super) fn print(&self) -> bool {
+    let this = self.as_ref();
+    match this.leaf {
+      Some(ref leaf) => {
+        println!("leaf: {:?}", std::str::from_utf8(leaf.key.as_ref()).unwrap());
+        return true;
+      }
+      None => {
+        for (_, e) in this.edges.iter() {
+          if e.print() {
+            return true;
+          }
+        }
+        return false;
+      }
+    }
   }
 }
 

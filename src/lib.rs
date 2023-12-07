@@ -7,7 +7,7 @@
 
 use core::num::NonZeroUsize;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use lru::LruCache;
 use node::{Edge, Inner, LeafNode};
 pub use node::{Node, Value};
@@ -178,6 +178,22 @@ impl<V> Txn<V> {
     }
     old_val
   }
+
+  /// Remove a given key. Returns the old value if any,
+  /// and a bool indicating if the key was set.
+  pub fn remove(&mut self, k: &[u8]) -> Option<Value<V>> {
+    let mut root = self.root.clone();
+    let (new_root, leaf) = self.remove_in(&mut root, k);
+    if let Some(new_root) = new_root {
+      if !new_root.is_null() {
+        self.root = new_root;
+      }
+    }
+    leaf.map(|l| {
+      self.size -= 1;
+      l.val
+    })
+  }
 }
 
 impl<V> Txn<V> {
@@ -204,7 +220,6 @@ impl<V> Txn<V> {
         //   t.trackChannel(n.leaf.mutateCh)
         // }
       }
-
       return n.clone();
     }
 
@@ -320,6 +335,106 @@ impl<V> Txn<V> {
       }
     }
   }
+
+  /// Does a recursive deletion
+  fn remove_in(&mut self, n: &mut Node<V>, mut search: &[u8]) -> (Option<Node<V>>, Option<LeafNode<V>>) {
+    // Check for key exhaustion
+    if search.is_empty() {
+      let nr = n.as_ref();
+      println!("from here {:?}", nr.prefix.as_ref());
+      match nr.leaf {
+        None => {
+          // println!("from here {:?}", nr.prefix.as_ref());
+          return (None, None)
+        },
+        Some(ref leaf) => {
+          // Copy the pointer in case we are in a transaction that already
+          // modified this node since the node will be reused. Any changes
+          // made to the node will not affect returning the original leaf
+          // value.
+          let mut old_leaf = leaf.clone();
+
+          // Remove the leaf node
+          let mut nc = self.write_node(n, true);
+          nc.clear_leaf();
+
+          // Check if this node should be merged
+          let nc_ref = nc.as_mut();
+          if n.ptr() != self.root.ptr() && nc_ref.edges.len() == 1 {
+            self.merge_child(nc_ref);
+          }
+          return (Some(nc), Some(old_leaf.clone()));
+        },
+      }
+    }
+
+    // Look for an edge
+    let label = search[0];
+    match n.get_edge_mut(label) {
+      None => {
+        println!("from here 1 {:?}", search);
+        (None, None)
+      },
+      Some(child) => {
+        let child_ref = child.as_ref();
+        if !search.starts_with(&child_ref.prefix) {
+          return (None, None);
+        }
+
+        // Consume the search prefix
+        search = &search[child_ref.prefix.len()..];
+        println!("search {:?} {:?}", search, child_ref.prefix.as_ref());
+        let (new_child, leaf) = self.remove_in(child, search);
+        // println!("prefix: ", ne);
+        match new_child {
+          None => {
+            println!("here");
+            return (None, None)
+          },
+          Some(new_child) => {
+            // Copy this node. WATCH OUT - it's safe to pass "false" here because we
+            // will only ADD a leaf via nc.merge_child() if there isn't one due to
+            // the !nc.is_leaf() check in the logic just below. This is pretty subtle,
+            // so be careful if you change any of the logic here.
+            let nc = self.write_node(n, false);
+            let nc_ref = nc.as_mut();
+            let new_child_ref = new_child.as_ref();
+            // Delete the edge if the node has no edges
+            if new_child_ref.leaf.is_none() && new_child_ref.edges.is_empty() {
+              nc.remove_edge(label);
+              if n.ptr() != self.root.ptr() && nc_ref.edges.len() == 1 && !nc.is_leaf() {
+                self.merge_child(nc_ref);
+              }
+            } else {
+              nc_ref.edges.insert(label, new_child);
+            }
+            println!("here");
+            (Some(nc), leaf)
+          },
+        }
+      },   
+    }
+  }
+
+  /// Called to collapse the given node with its child. This is only
+  /// called when the given node is not a leaf and has a single edge.
+  fn merge_child(&mut self, n: &mut Inner<V>) {
+    // Mark the child node as being mutated since we are about to abandon
+	  // it. We don't need to mark the leaf since we are retaining it if it
+	  // is there.
+    let (prefix, child) = n.edges.pop_first().unwrap();
+    // TODO: track
+
+    let child_ref = child.as_ref();
+    // Merge the nodes.
+    n.prefix = concat(&n.prefix, &[prefix]);
+    n.leaf = child_ref.leaf.clone();
+    if !child_ref.edges.is_empty() {
+      n.edges = child_ref.edges.clone();
+    } else {
+      n.edges.clear();
+    }
+  }
 }
 
 fn longest_prefix(k1: &[u8], k2: &[u8]) -> usize {
@@ -329,4 +444,11 @@ fn longest_prefix(k1: &[u8], k2: &[u8]) -> usize {
     i += 1;
   }
   i
+}
+
+fn concat(a: &[u8], b: &[u8]) -> Bytes {
+  let mut v = BytesMut::with_capacity(a.len() + b.len());
+  v.extend_from_slice(a);
+  v.extend_from_slice(b);
+  v.freeze()
 }
