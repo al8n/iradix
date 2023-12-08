@@ -168,8 +168,8 @@ impl<V> Txn<V> {
   /// Used to add or update a given key. The return provides
   /// the previous value if exist.
   pub fn insert(&mut self, k: Bytes, v: V) -> Option<Value<V>> {
-    let mut root = self.root.clone();
-    let (new_root, old_val) = self.insert_in(&mut root, k.clone(), k, v);
+    let root = self.root.clone();
+    let (new_root, old_val) = self.insert_in(root, k.clone(), k, v);
     if let Some(new_root) = new_root {
       self.root = new_root;
     }
@@ -182,12 +182,10 @@ impl<V> Txn<V> {
   /// Remove a given key. Returns the old value if any,
   /// and a bool indicating if the key was set.
   pub fn remove(&mut self, k: &[u8]) -> Option<Value<V>> {
-    let mut root = self.root.clone();
-    let (new_root, leaf) = self.remove_in(&mut root, k);
+    let root = self.root.clone();
+    let (new_root, leaf) = self.remove_in(root, k);
     if let Some(new_root) = new_root {
-      if !new_root.is_null() {
-        self.root = new_root;
-      }
+      self.root = new_root;
     }
     leaf.map(|l| {
       self.size -= 1;
@@ -201,7 +199,7 @@ impl<V> Txn<V> {
   /// modified during the course of the transaction, it is used in-place. Set
   /// `for_leaf_update` to true if you are getting a write node to update the leaf,
   /// which will set leaf mutation tracking appropriately as well.
-  fn write_node(&mut self, n: &Node<V>, for_leaf_update: bool) -> Node<V> {
+  fn write_node(&mut self, n: Node<V>, for_leaf_update: bool) -> Node<V> {
     // Ensure the writable set exists.
     let cache = self.cache.get_or_insert(LruCache::new(
       NonZeroUsize::new(DEFAULT_MODIFIED_CACHE).unwrap(),
@@ -228,7 +226,11 @@ impl<V> Txn<V> {
     // writing. You MUST replace it, because the channel associated with
     // this leaf will be closed when this transaction is committed.
     let nref = n.as_ref();
-    let nc = Node::new(nref.prefix.clone(), nref.edges.clone());
+    let nc = Node::from(Inner::new(
+      nref.prefix.clone(),
+      nref.leaf.clone(),
+      nref.edges.clone(),
+    ));
 
     // Mark this node as writable.
     cache.get_or_insert(nc.ptr(), || nc).clone()
@@ -237,7 +239,7 @@ impl<V> Txn<V> {
   /// Does a recursive insertion
   fn insert_in(
     &mut self,
-    n: &Node<V>,
+    n: Node<V>,
     key: Bytes,
     mut search: Bytes,
     val: V,
@@ -298,19 +300,15 @@ impl<V> Txn<V> {
 
         // Split the node
         let nc = self.write_node(n, false);
-        println!("child prefix nc: {:?}", child_ref.prefix.as_ref());
         let mut split_node = Node::from(Inner::new(
           Bytes::copy_from_slice(&search[..common_prefix]),
           None,
           Default::default(),
         ));
         nc.replace_edge(Edge::new(search[0], split_node.clone()));
-
-        println!("child prefix: {:?}", child_ref.prefix.as_ref());
         // Restore the existing child node
-        let mod_child = self.write_node(&child, false);
+        let mod_child = self.write_node(child.clone(), false);
         let mod_child_ref = mod_child.as_mut();
-        println!("common_prefix {common_prefix} {:?} {:?}", child_ref.prefix.as_ref(), mod_child_ref.prefix.as_ref());
         split_node.add_edge(Edge::new(
           mod_child_ref.prefix[common_prefix],
           mod_child.clone(),
@@ -341,16 +339,15 @@ impl<V> Txn<V> {
   }
 
   /// Does a recursive deletion
-  fn remove_in(&mut self, n: &Node<V>, mut search: &[u8]) -> (Option<Node<V>>, Option<LeafNode<V>>) {
+  fn remove_in(&mut self, n: Node<V>, mut search: &[u8]) -> (Option<Node<V>>, Option<LeafNode<V>>) {
     // Check for key exhaustion
     if search.is_empty() {
       let nr = n.as_ref();
-      println!("from here {:?}", nr.prefix.as_ref());
       match nr.leaf {
         None => {
           // println!("from here {:?}", nr.prefix.as_ref());
-          return (None, None)
-        },
+          return (None, None);
+        }
         Some(ref leaf) => {
           // Copy the pointer in case we are in a transaction that already
           // modified this node since the node will be reused. Any changes
@@ -359,7 +356,7 @@ impl<V> Txn<V> {
           let mut old_leaf = leaf.clone();
 
           // Remove the leaf node
-          let mut nc = self.write_node(n, true);
+          let mut nc = self.write_node(n.clone(), true);
           nc.clear_leaf();
 
           // Check if this node should be merged
@@ -368,17 +365,14 @@ impl<V> Txn<V> {
             self.merge_child(nc_ref);
           }
           return (Some(nc), Some(old_leaf.clone()));
-        },
+        }
       }
     }
 
     // Look for an edge
     let label = search[0];
     match n.get_edge(label) {
-      None => {
-        println!("from here 1 {:?}", search);
-        (None, None)
-      },
+      None => (None, None),
       Some((idx, child)) => {
         let child_ref = child.as_ref();
         if !search.starts_with(&child_ref.prefix) {
@@ -387,20 +381,15 @@ impl<V> Txn<V> {
 
         // Consume the search prefix
         search = &search[child_ref.prefix.len()..];
-        println!("search {:?} {:?}", search, child_ref.prefix.as_ref());
         let (new_child, leaf) = self.remove_in(child, search);
-        // println!("prefix: ", ne);
         match new_child {
-          None => {
-            println!("here");
-            return (None, None)
-          },
+          None => return (None, None),
           Some(new_child) => {
             // Copy this node. WATCH OUT - it's safe to pass "false" here because we
             // will only ADD a leaf via nc.merge_child() if there isn't one due to
             // the !nc.is_leaf() check in the logic just below. This is pretty subtle,
             // so be careful if you change any of the logic here.
-            let nc = self.write_node(n, false);
+            let nc = self.write_node(n.clone(), false);
             let nc_ref = nc.as_mut();
             let new_child_ref = new_child.as_ref();
             // Delete the edge if the node has no edges
@@ -412,11 +401,10 @@ impl<V> Txn<V> {
             } else {
               nc_ref.edges[idx].node = new_child;
             }
-            println!("here");
             (Some(nc), leaf)
-          },
+          }
         }
-      },   
+      }
     }
   }
 
@@ -424,8 +412,8 @@ impl<V> Txn<V> {
   /// called when the given node is not a leaf and has a single edge.
   fn merge_child(&mut self, n: &mut Inner<V>) {
     // Mark the child node as being mutated since we are about to abandon
-	  // it. We don't need to mark the leaf since we are retaining it if it
-	  // is there.
+    // it. We don't need to mark the leaf since we are retaining it if it
+    // is there.
     let e = n.edges.pop().unwrap();
     // TODO: track
 
