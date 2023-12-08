@@ -4,13 +4,14 @@ use bytes::Bytes;
 
 use crate::Kind;
 
-use self::vec::{VecEdgeInfo, VecEdgeInfoRef, VecInner};
+use self::{btree::BTreeInner, vec::VecInner};
 
 use super::{
   maybestd::{boxed::Box, vec::Vec, BTreeMap},
   sync::{Arc, AtomicUsize, Ordering},
 };
 
+mod btree;
 mod vec;
 
 /// Value
@@ -111,31 +112,42 @@ pub(super) trait EdgeInfo<T> {
 #[non_exhaustive]
 pub(super) enum Inner<T> {
   Vec(VecInner<T>),
+  BTree(BTreeInner<T>),
 }
 
 impl<T> Inner<T> {
   fn as_vec(&self) -> &VecInner<T> {
     match self {
       Self::Vec(v) => v,
+      _ => panic!("Inner::as_vec called on non-Vec"),
+    }
+  }
+
+  fn as_btree(&self) -> &BTreeInner<T> {
+    match self {
+      Self::BTree(v) => v,
+      _ => panic!("Inner::as_btree called on non-BTree"),
     }
   }
 
   pub(super) fn merge_child(&mut self) {
     match self {
       Self::Vec(v) => v.merge_child(),
+      Self::BTree(v) => v.merge_child(),
     }
   }
 
   pub(super) fn new_with_empty_edges(prefix: Bytes, leaf: Option<LeafNode<T>>, kind: Kind) -> Self {
     match kind {
       Kind::Vec => Self::Vec(VecInner::new(prefix, leaf, Vec::new())),
-      Kind::BTree => todo!(),
+      Kind::BTree => Self::BTree(BTreeInner::new(prefix, leaf, BTreeMap::new())),
     }
   }
 
   pub(super) fn update_edge(&mut self, idx: InnerEdgeKey, node: Node<T>) {
     match self {
       Self::Vec(v) => v.update_edge(idx.unwrap_vec(), node),
+      Self::BTree(v) => v.update_edge(idx.unwrap_btree(), node),
     }
   }
 
@@ -143,9 +155,18 @@ impl<T> Inner<T> {
     Self::Vec(VecInner::default())
   }
 
+  pub(super) fn btree() -> Self {
+    Self::BTree(BTreeInner::default())
+  }
+
   pub(super) fn clone_self(&self) -> Self {
     match self {
       Self::Vec(v) => Self::Vec(VecInner::new(
+        v.prefix.clone(),
+        v.leaf.clone(),
+        v.edges.clone(),
+      )),
+      Self::BTree(v) => Self::BTree(BTreeInner::new(
         v.prefix.clone(),
         v.leaf.clone(),
         v.edges.clone(),
@@ -156,12 +177,14 @@ impl<T> Inner<T> {
   fn add_edge(&mut self, e: Edge<T>) {
     match self {
       Self::Vec(v) => v.add_edge(e),
+      Self::BTree(v) => v.add_edge(e),
     }
   }
 
   fn replace_edge(&mut self, e: Edge<T>) {
     match self {
       Self::Vec(v) => v.replace_edge(e),
+      Self::BTree(v) => v.replace_edge(e),
     }
   }
 
@@ -170,6 +193,9 @@ impl<T> Inner<T> {
       Self::Vec(v) => v
         .get_edge(label)
         .map(|(idx, node)| (InnerEdgeKey::Vec(idx), node)),
+      Self::BTree(v) => v
+        .get_edge(label)
+        .map(|(idx, node)| (InnerEdgeKey::BTree(idx), node)),
     }
   }
 
@@ -178,36 +204,44 @@ impl<T> Inner<T> {
       Self::Vec(v) => v
         .get_edge_ref(label)
         .map(|(idx, node)| (InnerEdgeKey::Vec(idx), node)),
+      Self::BTree(v) => v
+        .get_edge_ref(label)
+        .map(|(idx, node)| (InnerEdgeKey::BTree(idx), node)),
     }
   }
 
   fn get_lower_bound_edge(&self, label: u8) -> Option<Node<T>> {
     match self {
       Self::Vec(v) => v.get_lower_bound_edge(label),
+      Self::BTree(v) => v.get_lower_bound_edge(label),
     }
   }
 
   fn remove_edge(&mut self, label: u8) -> Option<Node<T>> {
     match self {
       Self::Vec(v) => v.remove_edge(label),
+      Self::BTree(v) => v.remove_edge(label),
     }
   }
 
   fn is_leaf(&self) -> bool {
     match self {
       Self::Vec(v) => v.is_leaf(),
+      Self::BTree(v) => v.is_leaf(),
     }
   }
 
   fn set_leaf(&mut self, leaf: LeafNode<T>) {
     match self {
       Self::Vec(v) => v.set_leaf(leaf),
+      Self::BTree(v) => v.set_leaf(leaf),
     }
   }
 
   fn clear_leaf(&mut self) {
     match self {
       Self::Vec(v) => v.clear_leaf(),
+      Self::BTree(v) => v.clear_leaf(),
     }
   }
 
@@ -215,6 +249,7 @@ impl<T> Inner<T> {
   pub(super) fn leaf(&self) -> Option<&LeafNode<T>> {
     match self {
       Self::Vec(v) => v.leaf(),
+      Self::BTree(v) => v.leaf(),
     }
   }
 
@@ -222,6 +257,7 @@ impl<T> Inner<T> {
   pub(super) fn prefix(&self) -> &Bytes {
     match self {
       Self::Vec(v) => v.prefix(),
+      Self::BTree(v) => v.prefix(),
     }
   }
 
@@ -229,6 +265,7 @@ impl<T> Inner<T> {
   pub(super) fn set_prefix(&mut self, prefix: Bytes) {
     match self {
       Self::Vec(v) => v.set_prefix(prefix),
+      Self::BTree(v) => v.set_prefix(prefix),
     }
   }
 
@@ -236,6 +273,7 @@ impl<T> Inner<T> {
   pub(super) fn num_edges(&self) -> usize {
     match self {
       Self::Vec(v) => v.num_edges(),
+      Self::BTree(v) => v.num_edges(),
     }
   }
 
@@ -255,6 +293,9 @@ impl<T> Inner<T> {
           }
         }
         None
+      }
+      Self::BTree(v) => {
+        todo!()
       }
     }
   }
@@ -280,12 +321,16 @@ impl<T> Inner<T> {
 
         None
       }
+      Self::BTree(v) => {
+        todo!()
+      }
     }
   }
 }
 
 pub(super) enum InnerEdgeKey {
   Vec(usize),
+  BTree(u8),
 }
 
 impl InnerEdgeKey {
@@ -293,6 +338,13 @@ impl InnerEdgeKey {
     match self {
       Self::Vec(idx) => idx,
       _ => panic!("InnerEdgeKey::unwrap_vec called on non-Vec"),
+    }
+  }
+
+  fn unwrap_btree(self) -> u8 {
+    match self {
+      Self::BTree(idx) => idx,
+      _ => panic!("InnerEdgeKey::unwrap_btree called on non-BTree"),
     }
   }
 }

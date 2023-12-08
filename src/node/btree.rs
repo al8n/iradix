@@ -1,7 +1,7 @@
 use super::*;
 use crate::concat;
 
-pub(super) struct VecInner<T> {
+pub(super) struct BTreeInner<T> {
   /// Used to store possible leaf
   pub(super) leaf: Option<LeafNode<T>>,
 
@@ -11,22 +11,26 @@ pub(super) struct VecInner<T> {
   /// Should be stored in-order for iteration.
   /// We avoid a fully materialized slice to save memory,
   /// since in most cases we expect to be sparse
-  pub(super) edges: Vec<Edge<T>>,
+  pub(super) edges: BTreeMap<u8, Node<T>>,
 }
 
-impl<T> Default for VecInner<T> {
+impl<T> Default for BTreeInner<T> {
   fn default() -> Self {
     Self {
       leaf: None,
       prefix: Bytes::new(),
-      edges: Vec::new(),
+      edges: BTreeMap::new(),
     }
   }
 }
 
-impl<T> VecInner<T> {
+impl<T> BTreeInner<T> {
   #[inline]
-  pub(super) fn new(prefix: Bytes, leaf: Option<LeafNode<T>>, edges: Vec<Edge<T>>) -> Self {
+  pub(super) fn new(
+    prefix: Bytes,
+    leaf: Option<LeafNode<T>>,
+    edges: BTreeMap<u8, Node<T>>,
+  ) -> Self {
     Self {
       leaf,
       prefix,
@@ -38,10 +42,10 @@ impl<T> VecInner<T> {
     // Mark the child node as being mutated since we are about to abandon
     // it. We don't need to mark the leaf since we are retaining it if it
     // is there.
-    let e = self.edges.pop().unwrap();
+    let (_, node) = self.edges.pop_first().unwrap();
     // TODO: track
 
-    let child_ref = e.node.as_ref().as_vec();
+    let child_ref = node.as_ref().as_btree();
     // Merge the nodes.
     self.prefix = concat(&self.prefix, &child_ref.prefix);
     self.leaf = child_ref.leaf.clone();
@@ -53,8 +57,8 @@ impl<T> VecInner<T> {
   }
 }
 
-impl<T> NodeInner<T> for VecInner<T> {
-  type Key = usize;
+impl<T> NodeInner<T> for BTreeInner<T> {
+  type Key = u8;
 
   fn is_leaf(&self) -> bool {
     self.leaf.is_some()
@@ -85,25 +89,16 @@ impl<T> NodeInner<T> for VecInner<T> {
   }
 
   fn update_edge(&mut self, idx: Self::Key, node: Node<T>) {
-    self.edges[idx].node = node;
+    self.edges.insert(idx, node);
   }
 
   fn add_edge(&mut self, e: Edge<T>) {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= e.label);
-
-    if idx != num {
-      self.edges.insert(idx, e);
-    } else {
-      self.edges.push(e);
-    }
+    self.edges.insert(e.label, e.node);
   }
 
   fn replace_edge(&mut self, e: Edge<T>) {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= e.label);
-    if idx < num && self.edges[idx].label == e.label {
-      self.edges[idx].node = e.node;
+    if let Some(node) = self.edges.get_mut(&e.label) {
+      *node = e.node;
     } else {
       panic!("replacing missing edge");
     }
@@ -116,32 +111,18 @@ impl<T> NodeInner<T> for VecInner<T> {
   }
 
   fn get_edge_ref(&self, label: u8) -> Option<(Self::Key, &Node<T>)> {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= label);
-    if idx < num && self.edges[idx].label == label {
-      Some((idx, &self.edges[idx].node))
-    } else {
-      None
-    }
+    self.edges.get(&label).map(|n| (label, n))
   }
 
   fn get_lower_bound_edge(&self, label: u8) -> Option<Node<T>> {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= label);
-    if idx < num {
-      Some(self.edges[idx].node.clone())
-    } else {
-      None
-    }
+    self
+      .edges
+      .range(label..)
+      .next()
+      .map(|(_, node)| node.clone())
   }
 
   fn remove_edge(&mut self, label: u8) -> Option<Node<T>> {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= label);
-    if idx < num && self.edges[idx].label == label {
-      Some(self.edges.remove(idx).node)
-    } else {
-      None
-    }
+    self.edges.remove(&label)
   }
 }
