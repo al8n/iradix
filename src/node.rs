@@ -2,10 +2,16 @@ use core::{cell::UnsafeCell, fmt::Debug};
 
 use bytes::Bytes;
 
+use crate::Kind;
+
+use self::vec::{VecEdgeInfo, VecEdgeInfoRef, VecInner};
+
 use super::{
   maybestd::{boxed::Box, vec::Vec, BTreeMap},
   sync::{Arc, AtomicUsize, Ordering},
 };
+
+mod vec;
 
 /// Value
 #[derive(Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -76,31 +82,217 @@ impl<T> Clone for Edge<T> {
   }
 }
 
-pub(super) enum Edges<T> {
-  Vec(Vec<Edge<T>>),
-  BTreeMap(BTreeMap<u8, Node<T>>),
+pub(super) trait NodeInner<T> {
+  type Key;
+
+  fn is_leaf(&self) -> bool;
+  fn set_leaf(&mut self, leaf: LeafNode<T>);
+  fn clear_leaf(&mut self);
+  fn leaf(&self) -> Option<&LeafNode<T>>;
+
+  fn prefix(&self) -> &Bytes;
+  fn set_prefix(&mut self, prefix: Bytes);
+
+  fn num_edges(&self) -> usize;
+  fn update_edge(&mut self, idx: Self::Key, node: Node<T>);
+
+  fn add_edge(&mut self, e: Edge<T>);
+  fn replace_edge(&mut self, e: Edge<T>);
+  fn get_edge(&self, label: u8) -> Option<(Self::Key, Node<T>)>;
+  fn get_edge_ref(&self, label: u8) -> Option<(Self::Key, &Node<T>)>;
+  fn get_lower_bound_edge(&self, label: u8) -> Option<Node<T>>;
+  fn remove_edge(&mut self, label: u8) -> Option<Node<T>>;
 }
 
-pub(super) struct Inner<T> {
-  /// Used to store possible leaf
-  pub(super) leaf: Option<LeafNode<T>>,
+pub(super) trait EdgeInfo<T> {
+  fn node(&self) -> &Node<T>;
+}
 
-  /// The common prefix we ignore
-  pub(super) prefix: Bytes,
-
-  /// Should be stored in-order for iteration.
-  /// We avoid a fully materialized slice to save memory,
-  /// since in most cases we expect to be sparse
-  pub(super) edges: Vec<Edge<T>>,
+#[non_exhaustive]
+pub(super) enum Inner<T> {
+  Vec(VecInner<T>),
 }
 
 impl<T> Inner<T> {
+  fn as_vec(&self) -> &VecInner<T> {
+    match self {
+      Self::Vec(v) => v,
+    }
+  }
+
+  pub(super) fn merge_child(&mut self) {
+    match self {
+      Self::Vec(v) => v.merge_child(),
+    }
+  }
+
+  pub(super) fn new_with_empty_edges(prefix: Bytes, leaf: Option<LeafNode<T>>, kind: Kind) -> Self {
+    match kind {
+      Kind::Vec => Self::Vec(VecInner::new(prefix, leaf, Vec::new())),
+      Kind::BTree => todo!(),
+    }
+  }
+
+  pub(super) fn update_edge(&mut self, idx: InnerEdgeKey, node: Node<T>) {
+    match self {
+      Self::Vec(v) => v.update_edge(idx.unwrap_vec(), node),
+    }
+  }
+
+  pub(super) fn vec() -> Self {
+    Self::Vec(VecInner::default())
+  }
+
+  pub(super) fn clone_self(&self) -> Self {
+    match self {
+      Self::Vec(v) => Self::Vec(VecInner::new(
+        v.prefix.clone(),
+        v.leaf.clone(),
+        v.edges.clone(),
+      )),
+    }
+  }
+
+  fn add_edge(&mut self, e: Edge<T>) {
+    match self {
+      Self::Vec(v) => v.add_edge(e),
+    }
+  }
+
+  fn replace_edge(&mut self, e: Edge<T>) {
+    match self {
+      Self::Vec(v) => v.replace_edge(e),
+    }
+  }
+
+  fn get_edge(&self, label: u8) -> Option<(InnerEdgeKey, Node<T>)> {
+    match self {
+      Self::Vec(v) => v
+        .get_edge(label)
+        .map(|(idx, node)| (InnerEdgeKey::Vec(idx), node)),
+    }
+  }
+
+  fn get_edge_ref(&self, label: u8) -> Option<(InnerEdgeKey, &Node<T>)> {
+    match self {
+      Self::Vec(v) => v
+        .get_edge_ref(label)
+        .map(|(idx, node)| (InnerEdgeKey::Vec(idx), node)),
+    }
+  }
+
+  fn get_lower_bound_edge(&self, label: u8) -> Option<Node<T>> {
+    match self {
+      Self::Vec(v) => v.get_lower_bound_edge(label),
+    }
+  }
+
+  fn remove_edge(&mut self, label: u8) -> Option<Node<T>> {
+    match self {
+      Self::Vec(v) => v.remove_edge(label),
+    }
+  }
+
+  fn is_leaf(&self) -> bool {
+    match self {
+      Self::Vec(v) => v.is_leaf(),
+    }
+  }
+
+  fn set_leaf(&mut self, leaf: LeafNode<T>) {
+    match self {
+      Self::Vec(v) => v.set_leaf(leaf),
+    }
+  }
+
+  fn clear_leaf(&mut self) {
+    match self {
+      Self::Vec(v) => v.clear_leaf(),
+    }
+  }
+
   #[inline]
-  pub(super) fn new(prefix: Bytes, leaf: Option<LeafNode<T>>, edges: Vec<Edge<T>>) -> Self {
-    Self {
-      leaf,
-      prefix,
-      edges,
+  pub(super) fn leaf(&self) -> Option<&LeafNode<T>> {
+    match self {
+      Self::Vec(v) => v.leaf(),
+    }
+  }
+
+  #[inline]
+  pub(super) fn prefix(&self) -> &Bytes {
+    match self {
+      Self::Vec(v) => v.prefix(),
+    }
+  }
+
+  #[inline]
+  pub(super) fn set_prefix(&mut self, prefix: Bytes) {
+    match self {
+      Self::Vec(v) => v.set_prefix(prefix),
+    }
+  }
+
+  #[inline]
+  pub(super) fn num_edges(&self) -> usize {
+    match self {
+      Self::Vec(v) => v.num_edges(),
+    }
+  }
+
+  fn minimum(&self) -> Option<(&[u8], &T)> {
+    match self {
+      Self::Vec(v) => {
+        let mut current = v;
+        loop {
+          if let Some(leaf) = current.leaf() {
+            return Some((&leaf.key, &leaf.val));
+          }
+          let num_edges = current.num_edges();
+          if num_edges > 0 {
+            current = v.edges[0].node.as_ref().as_vec();
+          } else {
+            break;
+          }
+        }
+        None
+      }
+    }
+  }
+
+  fn maximum(&self) -> Option<(&[u8], &T)> {
+    match self {
+      Self::Vec(v) => {
+        let mut current = v;
+        loop {
+          let num = current.num_edges();
+          if num > 0 {
+            current = v.edges[num - 1].node.as_ref().as_vec();
+            continue;
+          }
+
+          // If the current node is a leaf, return its key and value
+          if let Some(leaf) = &v.leaf {
+            return Some((&leaf.key, &leaf.val));
+          } else {
+            break;
+          }
+        }
+
+        None
+      }
+    }
+  }
+}
+
+pub(super) enum InnerEdgeKey {
+  Vec(usize),
+}
+
+impl InnerEdgeKey {
+  fn unwrap_vec(self) -> usize {
+    match self {
+      Self::Vec(idx) => idx,
+      _ => panic!("InnerEdgeKey::unwrap_vec called on non-Vec"),
     }
   }
 }
@@ -118,9 +310,9 @@ unsafe impl<T> Sync for Node<T> {}
 impl<T: Debug> Debug for Node<T> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_struct("Node")
-      .field("leaf", &self.as_ref().leaf)
-      .field("prefix", &self.as_ref().prefix)
-      .field("edges", &self.as_ref().edges)
+      .field("leaf", &self.as_ref().leaf())
+      .field("prefix", &self.as_ref().prefix())
+      .field("edges", &self.as_ref().num_edges())
       .finish()
   }
 }
@@ -136,41 +328,12 @@ impl<T> Clone for Node<T> {
 impl<T> Node<T> {
   /// Return the minimum value in the tree
   pub fn minimum(&self) -> Option<(&[u8], &T)> {
-    let mut current = self;
-    loop {
-      let n = current.as_ref();
-      if let Some(leaf) = &n.leaf {
-        return Some((&leaf.key, &leaf.val));
-      }
-      if !n.edges.is_empty() {
-        current = &n.edges[0].node;
-      } else {
-        break;
-      }
-    }
-    None
+    self.as_ref().minimum()
   }
 
   /// Return the maximum value in the tree
   pub fn maximum(&self) -> Option<(&[u8], &T)> {
-    let mut current = self;
-    loop {
-      let n = current.as_ref();
-      let num = n.edges.len();
-      if num > 0 {
-        current = &n.edges[num - 1].node;
-        continue;
-      }
-
-      // If the current node is a leaf, return its key and value
-      if let Some(leaf) = &n.leaf {
-        return Some((&leaf.key, &leaf.val));
-      } else {
-        break;
-      }
-    }
-
-    None
+    self.as_ref().maximum()
   }
 
   /// Returns the value associated with the given key, if it exists.
@@ -183,7 +346,7 @@ impl<T> Node<T> {
 
       // Check if the current node is a leaf and the search key is exhausted
       if search.is_empty() {
-        if let Some(leaf) = &n.leaf {
+        if let Some(leaf) = n.leaf() {
           return Some(&leaf.val);
         }
         break;
@@ -193,9 +356,10 @@ impl<T> Node<T> {
       match current.get_edge_ref(search[0]) {
         Some((_, node)) => {
           let nref = node.as_ref();
+          let prefix = nref.prefix();
           // Check if the search key starts with the node's prefix
-          if search.starts_with(&nref.prefix) {
-            search = &search[nref.prefix.len()..];
+          if search.starts_with(prefix) {
+            search = &search[prefix.len()..];
             current = node;
           } else {
             // Prefix mismatch; stop searching
@@ -221,7 +385,7 @@ impl<T> Node<T> {
     loop {
       let n = current.as_ref();
       // Update last_leaf if current node is a leaf
-      if let Some(leaf) = &n.leaf {
+      if let Some(leaf) = n.leaf() {
         last_leaf = Some((&leaf.key, &leaf.val));
       }
 
@@ -234,10 +398,11 @@ impl<T> Node<T> {
       match current.get_edge_ref(search[0]) {
         Some((_, node)) => {
           let nref = node.as_ref();
+          let prefix = nref.prefix();
           // If the current node's prefix matches the search key,
           // continue searching deeper in the tree
-          if search.starts_with(&nref.prefix) {
-            search = &search[nref.prefix.len()..];
+          if search.starts_with(prefix) {
+            search = &search[prefix.len()..];
             current = node;
           } else {
             // Prefix mismatch; stop searching
@@ -249,6 +414,14 @@ impl<T> Node<T> {
     }
 
     last_leaf
+  }
+}
+
+impl<T> From<VecInner<T>> for Node<T> {
+  fn from(inner: VecInner<T>) -> Self {
+    Self {
+      ptr: Arc::new(UnsafeCell::new(Inner::Vec(inner))),
+    }
   }
 }
 
@@ -276,97 +449,61 @@ impl<T> Node<T> {
     unsafe { &mut *self.ptr.get() }
   }
 
-  #[inline]
-  pub(super) fn dangling() -> Self {
-    Self {
-      ptr: Arc::new(UnsafeCell::new(Inner {
-        leaf: None,
-        prefix: Bytes::new(),
-        edges: Default::default(),
-      })),
-    }
-  }
+  // #[inline]
+  // pub(super) fn dangling() -> Self {
+  //   Self {
+  //     ptr: Arc::new(UnsafeCell::new(VecInner {
+  //       leaf: None,
+  //       prefix: Bytes::new(),
+  //       edges: Default::default(),
+  //     })),
+  //   }
+  // }
 
-  pub(super) fn new(prefix: Bytes, edges: Vec<Edge<T>>) -> Self {
-    Self {
-      ptr: Arc::new(UnsafeCell::new(Inner {
-        leaf: None,
-        prefix,
-        edges,
-      })),
-    }
-  }
+  // pub(super) fn new(prefix: Bytes, edges: Vec<Edge<T>>) -> Self {
+  //   Self {
+  //     ptr: Arc::new(UnsafeCell::new(VecInner {
+  //       leaf: None,
+  //       prefix,
+  //       edges,
+  //     })),
+  //   }
+  // }
 
   pub(super) fn set_leaf(&mut self, leaf: LeafNode<T>) {
-    self.as_mut().leaf = Some(leaf);
+    self.as_mut().set_leaf(leaf);
   }
 
   pub(super) fn clear_leaf(&mut self) {
-    self.as_mut().leaf = None;
+    self.as_mut().clear_leaf();
   }
 
   #[inline]
   pub(super) fn is_leaf(&self) -> bool {
-    self.as_ref().leaf.is_some()
+    self.as_ref().is_leaf()
   }
 
   pub(super) fn add_edge(&self, e: Edge<T>) {
-    let this = self.as_mut();
-    let num = this.edges.len();
-    let idx = indexsort::search(num, |i| this.edges[i].label >= e.label);
-
-    if idx != num {
-      this.edges.insert(idx, e);
-    } else {
-      this.edges.push(e);
-    }
+    self.as_mut().add_edge(e);
   }
 
   pub(super) fn replace_edge(&self, e: Edge<T>) {
-    let this = self.as_mut();
-    let num = this.edges.len();
-    let idx = indexsort::search(num, |i| this.edges[i].label >= e.label);
-    if idx < num && this.edges[idx].label == e.label {
-      this.edges[idx].node = e.node;
-    } else {
-      panic!("replacing missing edge");
-    }
+    self.as_mut().replace_edge(e);
   }
 
-  pub(super) fn get_edge(&self, label: u8) -> Option<(usize, Node<T>)> {
-    self.get_edge_ref(label).map(|(idx, n)| (idx, n.clone()))
+  pub(super) fn get_edge(&self, label: u8) -> Option<(InnerEdgeKey, Node<T>)> {
+    self.as_ref().get_edge(label)
   }
 
-  pub(super) fn get_edge_ref(&self, label: u8) -> Option<(usize, &Node<T>)> {
-    let this = self.as_mut();
-    let num = this.edges.len();
-    let idx = indexsort::search(num, |i| this.edges[i].label >= label);
-    if idx < num && this.edges[idx].label == label {
-      Some((idx, &this.edges[idx].node))
-    } else {
-      None
-    }
+  pub(super) fn get_edge_ref(&self, label: u8) -> Option<(InnerEdgeKey, &Node<T>)> {
+    self.as_ref().get_edge_ref(label)
   }
 
   pub(super) fn get_lower_bound_edge(&self, label: u8) -> Option<Node<T>> {
-    let this = self.as_mut();
-    let num = this.edges.len();
-    let idx = indexsort::search(num, |i| this.edges[i].label >= label);
-    if idx < num {
-      Some(this.edges[idx].node.clone())
-    } else {
-      None
-    }
+    self.as_ref().get_lower_bound_edge(label)
   }
 
   pub(super) fn remove_edge(&self, label: u8) -> Option<Node<T>> {
-    let this = self.as_mut();
-    let num = this.edges.len();
-    let idx = indexsort::search(num, |i| this.edges[i].label >= label);
-    if idx < num && this.edges[idx].label == label {
-      Some(this.edges.remove(idx).node)
-    } else {
-      None
-    }
+    self.as_mut().remove_edge(label)
   }
 }

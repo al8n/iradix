@@ -69,6 +69,12 @@ mod sync {
 /// also be bounded in a similar way.
 const DEFAULT_MODIFIED_CACHE: usize = 8192;
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum Kind {
+  Vec,
+  BTree,
+}
+
 /// Tree implements an immutable radix tree. This can be treated as a
 /// Dictionary abstract data type. The main advantage over a standard
 /// hash map is prefix-based lookups and ordered iteration. The immutability
@@ -84,7 +90,7 @@ impl<V> Tree<V> {
   #[inline]
   pub fn new() -> Self {
     Self {
-      root: Node::dangling(),
+      root: Node::from(Inner::vec()),
       size: 0,
     }
   }
@@ -109,6 +115,7 @@ impl<V> Tree<V> {
       snap: self.root.clone(),
       size: self.size,
       cache: None,
+      kind: Kind::Vec,
     }
   }
 
@@ -120,6 +127,7 @@ impl<V> Tree<V> {
       snap: self.root.clone(),
       size: self.size,
       cache: None,
+      kind: Kind::Vec,
     }
   }
 }
@@ -138,6 +146,9 @@ pub struct Txn<V, S = lru::DefaultHasher> {
   /// Tracks the size of the tree as it is modified during the
   /// transaction.
   size: usize,
+
+  /// The transaction kind
+  kind: Kind,
 
   cache: Option<LruCache<usize, Node<V>, S>>,
 }
@@ -199,7 +210,7 @@ impl<V> Txn<V> {
   /// modified during the course of the transaction, it is used in-place. Set
   /// `for_leaf_update` to true if you are getting a write node to update the leaf,
   /// which will set leaf mutation tracking appropriately as well.
-  fn write_node(&mut self, n: Node<V>, for_leaf_update: bool) -> Node<V> {
+  fn write_node(&mut self, n: &Node<V>, for_leaf_update: bool) -> Node<V> {
     // Ensure the writable set exists.
     let cache = self.cache.get_or_insert(LruCache::new(
       NonZeroUsize::new(DEFAULT_MODIFIED_CACHE).unwrap(),
@@ -226,11 +237,7 @@ impl<V> Txn<V> {
     // writing. You MUST replace it, because the channel associated with
     // this leaf will be closed when this transaction is committed.
     let nref = n.as_ref();
-    let nc = Node::from(Inner::new(
-      nref.prefix.clone(),
-      nref.leaf.clone(),
-      nref.edges.clone(),
-    ));
+    let nc = Node::from(nref.clone_self());
 
     // Mark this node as writable.
     cache.get_or_insert(nc.ptr(), || nc).clone()
@@ -248,11 +255,11 @@ impl<V> Txn<V> {
     if search.is_empty() {
       let mut old_val = None;
       let nr = n.as_ref();
-      if let Some(leaf) = &nr.leaf {
+      if let Some(leaf) = nr.leaf() {
         old_val = Some(leaf.val.clone());
       }
 
-      let mut nc = self.write_node(n, true);
+      let mut nc = self.write_node(&n, true);
       nc.set_leaf(LeafNode {
         key,
         val: Value::new(val),
@@ -265,33 +272,34 @@ impl<V> Txn<V> {
       None => {
         let e = Edge::new(
           search[0],
-          Node::from(Inner::new(
+          Node::from(Inner::new_with_empty_edges(
             search,
             Some(LeafNode {
               key,
               val: Value::new(val),
             }),
-            Default::default(),
+            self.kind,
           )),
         );
-        let nc = self.write_node(n, false);
+        let nc = self.write_node(&n, false);
         nc.add_edge(e);
         (Some(nc), None)
       }
-      Some((idx, mut child)) => {
+      Some((idx, child)) => {
         // Determine longest prefix of the search key on match
         let child_ref = child.as_ref();
-        let common_prefix = longest_prefix(&search, &child_ref.prefix);
+        let child_prefix = child_ref.prefix();
+        let common_prefix = longest_prefix(&search, child_prefix);
 
-        if common_prefix == child_ref.prefix.len() {
+        if common_prefix == child_prefix.len() {
           search = search.slice(common_prefix..);
           let prefix = search[0];
           let (new_child, old_val) = self.insert_in(child, key, search, val);
 
           if let Some(new_child) = new_child {
-            let nc = self.write_node(n, false);
+            let nc = self.write_node(&n, false);
             let nc_ref = nc.as_mut();
-            nc_ref.edges[idx].node = new_child;
+            nc_ref.update_edge(idx, new_child);
             return (Some(nc), old_val);
           }
 
@@ -299,21 +307,22 @@ impl<V> Txn<V> {
         }
 
         // Split the node
-        let nc = self.write_node(n, false);
-        let mut split_node = Node::from(Inner::new(
+        let nc = self.write_node(&n, false);
+        let mut split_node = Node::from(Inner::new_with_empty_edges(
           Bytes::copy_from_slice(&search[..common_prefix]),
           None,
-          Default::default(),
+          self.kind,
         ));
         nc.replace_edge(Edge::new(search[0], split_node.clone()));
         // Restore the existing child node
-        let mod_child = self.write_node(child.clone(), false);
+        let mod_child = self.write_node(&child, false);
         let mod_child_ref = mod_child.as_mut();
+        let mod_child_prefix = mod_child_ref.prefix();
         split_node.add_edge(Edge::new(
-          mod_child_ref.prefix[common_prefix],
+          mod_child_prefix[common_prefix],
           mod_child.clone(),
         ));
-        mod_child_ref.prefix = mod_child_ref.prefix.slice(common_prefix..);
+        mod_child_ref.set_prefix(mod_child_prefix.slice(common_prefix..));
 
         // Create the new leaf node
         let new_leaf = LeafNode {
@@ -331,7 +340,11 @@ impl<V> Txn<V> {
         // Create a new edge for the node
         split_node.add_edge(Edge::new(
           search[0],
-          Node::from(Inner::new(search, Some(new_leaf), Default::default())),
+          Node::from(Inner::new_with_empty_edges(
+            search,
+            Some(new_leaf),
+            self.kind,
+          )),
         ));
         (Some(nc), None)
       }
@@ -343,12 +356,12 @@ impl<V> Txn<V> {
     // Check for key exhaustion
     if search.is_empty() {
       let nr = n.as_ref();
-      match nr.leaf {
+      match nr.leaf() {
         None => {
           // println!("from here {:?}", nr.prefix.as_ref());
           return (None, None);
         }
-        Some(ref leaf) => {
+        Some(leaf) => {
           // Copy the pointer in case we are in a transaction that already
           // modified this node since the node will be reused. Any changes
           // made to the node will not affect returning the original leaf
@@ -356,12 +369,13 @@ impl<V> Txn<V> {
           let mut old_leaf = leaf.clone();
 
           // Remove the leaf node
-          let mut nc = self.write_node(n.clone(), true);
+          let mut nc = self.write_node(&n, true);
           nc.clear_leaf();
 
           // Check if this node should be merged
           let nc_ref = nc.as_mut();
-          if n.ptr() != self.root.ptr() && nc_ref.edges.len() == 1 {
+          let nc_edges = nc_ref.num_edges();
+          if n.ptr() != self.root.ptr() && nc_edges == 1 {
             self.merge_child(nc_ref);
           }
           return (Some(nc), Some(old_leaf.clone()));
@@ -373,14 +387,15 @@ impl<V> Txn<V> {
     let label = search[0];
     match n.get_edge(label) {
       None => (None, None),
-      Some((idx, child)) => {
+      Some((ek, child)) => {
         let child_ref = child.as_ref();
-        if !search.starts_with(&child_ref.prefix) {
+        let child_prefix = child_ref.prefix();
+        if !search.starts_with(child_prefix) {
           return (None, None);
         }
 
         // Consume the search prefix
-        search = &search[child_ref.prefix.len()..];
+        search = &search[child_prefix.len()..];
         let (new_child, leaf) = self.remove_in(child, search);
         match new_child {
           None => return (None, None),
@@ -389,17 +404,19 @@ impl<V> Txn<V> {
             // will only ADD a leaf via nc.merge_child() if there isn't one due to
             // the !nc.is_leaf() check in the logic just below. This is pretty subtle,
             // so be careful if you change any of the logic here.
-            let nc = self.write_node(n.clone(), false);
+            let nc = self.write_node(&n, false);
             let nc_ref = nc.as_mut();
+            let nc_edges = nc_ref.num_edges();
             let new_child_ref = new_child.as_ref();
+            let new_child_edges = new_child_ref.num_edges();
             // Delete the edge if the node has no edges
-            if new_child_ref.leaf.is_none() && new_child_ref.edges.is_empty() {
+            if new_child_ref.leaf().is_none() && new_child_edges == 0 {
               nc.remove_edge(label);
-              if n.ptr() != self.root.ptr() && nc_ref.edges.len() == 1 && !nc.is_leaf() {
+              if n.ptr() != self.root.ptr() && nc_edges == 1 && !nc.is_leaf() {
                 self.merge_child(nc_ref);
               }
             } else {
-              nc_ref.edges[idx].node = new_child;
+              nc_ref.update_edge(ek, new_child);
             }
             (Some(nc), leaf)
           }
@@ -410,23 +427,7 @@ impl<V> Txn<V> {
 
   /// Called to collapse the given node with its child. This is only
   /// called when the given node is not a leaf and has a single edge.
-  fn merge_child(&mut self, n: &mut Inner<V>) {
-    // Mark the child node as being mutated since we are about to abandon
-    // it. We don't need to mark the leaf since we are retaining it if it
-    // is there.
-    let e = n.edges.pop().unwrap();
-    // TODO: track
-
-    let child_ref = e.node.as_ref();
-    // Merge the nodes.
-    n.prefix = concat(&n.prefix, &child_ref.prefix);
-    n.leaf = child_ref.leaf.clone();
-    if !child_ref.edges.is_empty() {
-      n.edges = child_ref.edges.clone();
-    } else {
-      n.edges.clear();
-    }
-  }
+  fn merge_child(&mut self, n: &mut Inner<V>) {}
 }
 
 fn longest_prefix(k1: &[u8], k2: &[u8]) -> usize {
@@ -438,7 +439,7 @@ fn longest_prefix(k1: &[u8], k2: &[u8]) -> usize {
   i
 }
 
-fn concat(a: &[u8], b: &[u8]) -> Bytes {
+pub(crate) fn concat(a: &[u8], b: &[u8]) -> Bytes {
   let mut v = BytesMut::with_capacity(a.len() + b.len());
   v.extend_from_slice(a);
   v.extend_from_slice(b);
