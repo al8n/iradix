@@ -54,15 +54,22 @@ impl<T> Clone for LeafNode<T> {
   }
 }
 
+#[derive(Debug)]
 pub(super) struct Edge<T> {
-  label: u8,
-  node: Node<T>,
+  pub(super) label: u8,
+  pub(super) node: Node<T>,
 }
 
 impl<T> Edge<T> {
   #[inline]
   pub(super) const fn new(label: u8, node: Node<T>) -> Self {
     Self { label, node }
+  }
+}
+
+impl<T> Clone for Edge<T> {
+  fn clone(&self) -> Self {
+    Self { label: self.label, node: self.node.clone() }
   }
 }
 
@@ -76,7 +83,7 @@ pub(super) struct Inner<T> {
   /// Should be stored in-order for iteration.
   /// We avoid a fully materialized slice to save memory,
   /// since in most cases we expect to be sparse
-  pub(super) edges: BTreeMap<u8, Node<T>>,
+  pub(super) edges: Vec<Edge<T>>,
 
   refs: AtomicUsize,
 }
@@ -86,7 +93,7 @@ impl<T> Inner<T> {
   pub(super) fn new(
     prefix: Bytes,
     leaf: Option<LeafNode<T>>,
-    edges: BTreeMap<u8, Node<T>>,
+    edges: Vec<Edge<T>>,
   ) -> Self {
     Self {
       leaf,
@@ -197,8 +204,8 @@ impl<T> Node<T> {
       if let Some(leaf) = &n.leaf {
         return Some((&leaf.key, &leaf.val));
       }
-      if let Some((_, node)) = n.edges.iter().next() {
-        current = node;
+      if !n.edges.is_empty() {
+        current = &n.edges[0].node;
       } else {
         break;
       }
@@ -211,16 +218,16 @@ impl<T> Node<T> {
     let mut current = self;
     loop {
       let n = current.as_ref();
+      let num = n.edges.len();
+      if num > 0 {
+        current = &n.edges[num - 1].node;
+        continue;
+      }
+
       // If the current node is a leaf, return its key and value
       if let Some(leaf) = &n.leaf {
         return Some((&leaf.key, &leaf.val));
-      }
-
-      // Otherwise, go to the right-most (maximum) edge
-      if let Some((_, node)) = n.edges.iter().next_back() {
-        current = node;
       } else {
-        // No edges to follow, exit the loop
         break;
       }
     }
@@ -246,7 +253,7 @@ impl<T> Node<T> {
 
       // Try to find the edge corresponding to the next byte in the search key
       match current.get_edge(search[0]) {
-        Some(node) => {
+        Some((_, node)) => {
           let nref = node.as_ref();
           // Check if the search key starts with the node's prefix
           if search.starts_with(&nref.prefix) {
@@ -287,7 +294,7 @@ impl<T> Node<T> {
 
       // Try to find the edge corresponding to the next byte in the search key
       match current.get_edge(search[0]) {
-        Some(node) => {
+        Some((_, node)) => {
           let nref = node.as_ref();
           // If the current node's prefix matches the search key,
           // continue searching deeper in the tree
@@ -347,7 +354,7 @@ impl<T> Node<T> {
     }
   }
 
-  pub(super) fn new(prefix: Bytes, edges: BTreeMap<u8, Node<T>>) -> Self {
+  pub(super) fn new(prefix: Bytes, edges: Vec<Edge<T>>) -> Self {
     Self {
       ptr: Box::into_raw(Box::new(Inner {
         leaf: None,
@@ -375,40 +382,82 @@ impl<T> Node<T> {
 
   pub(super) fn add_edge(&self, e: Edge<T>) {
     let this = self.as_mut();
-    this.edges.insert(e.label, e.node);
+    let num = this.edges.len();
+    let idx = indexsort::search(num, |i| {
+      this.edges[i].label >= e.label
+    });
+
+    if idx != num {
+      this.edges.insert(idx, e);
+    } else {
+      this.edges.push(e);
+    }
   }
 
   pub(super) fn replace_edge(&self, e: Edge<T>) {
     let this = self.as_mut();
-    if let Some(node) = this.edges.get_mut(&e.label) {
-      *node = e.node;
+    let num = this.edges.len();
+    let idx = indexsort::search(num, |i| {
+      this.edges[i].label >= e.label
+    });
+    println!("replace edge: {} {:?}", idx, e.node.as_ref().prefix.as_ref());
+    if idx < num && this.edges[idx].label == e.label {
+      this.edges[idx].node = e.node;
     } else {
       panic!("replacing missing edge");
     }
   }
 
-  pub(super) fn get_edge(&self, label: u8) -> Option<&Node<T>> {
-    if self.is_null() {
-      return None;
+  pub(super) fn get_edge(&self, label: u8) -> Option<(usize, &Node<T>)> {
+    let this = self.as_mut();
+    let num = this.edges.len();
+    let idx = indexsort::search(num, |i| {
+      this.edges[i].label >= label
+    });
+    if idx < num && this.edges[idx].label == label {
+      Some((idx, &this.edges[idx].node))
+    } else {
+      None
     }
-    self.as_ref().edges.get(&label)
   }
 
   pub(super) fn get_edge_mut(&self, label: u8) -> Option<&mut Node<T>> {
-    self.as_mut().edges.get_mut(&label)
+    let this = self.as_mut();
+    let num = this.edges.len();
+    let idx = indexsort::search(num, |i| {
+      this.edges[i].label >= label
+    });
+    if idx < num && this.edges[idx].label == label {
+      Some(&mut this.edges[idx].node)
+    } else {
+      None
+    }
   }
 
   pub(super) fn get_lower_bound_edge(&self, label: u8) -> Option<&Node<T>> {
-    self
-      .as_ref()
-      .edges
-      .range(label..)
-      .next()
-      .map(|(_, node)| node)
+    let this = self.as_mut();
+    let num = this.edges.len();
+    let idx = indexsort::search(num, |i| {
+      this.edges[i].label >= label
+    });
+    if idx < num {
+      Some(&this.edges[idx].node)
+    } else {
+      None
+    }
   }
 
   pub(super) fn remove_edge(&self, label: u8) -> Option<Node<T>> {
-    self.as_mut().edges.remove(&label)
+    let this = self.as_mut();
+    let num = this.edges.len();
+    let idx = indexsort::search(num, |i| {
+      this.edges[i].label >= label
+    });
+    if idx < num && this.edges[idx].label == label {
+      Some(this.edges.remove(idx).node)
+    } else {
+      None
+    }
   }
 
   pub(super) fn print(&self) -> bool {
@@ -419,8 +468,8 @@ impl<T> Node<T> {
         return true;
       }
       None => {
-        for (_, e) in this.edges.iter() {
-          if e.print() {
+        for e in this.edges.iter() {
+          if e.node.print() {
             return true;
           }
         }
