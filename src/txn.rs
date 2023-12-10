@@ -1,4 +1,4 @@
-use core::{num::NonZeroUsize, cell::RefCell};
+use core::{cell::RefCell, num::NonZeroUsize};
 
 use bytes::{Bytes, BytesMut};
 use lru::LruCache;
@@ -81,7 +81,7 @@ impl<V> Txn<V> {
       l.val
     })
   }
-  
+
   /// Used to delete an entire subtree that matches the prefix
   /// This will delete all nodes under that prefix
   pub fn remove_prefix(&mut self, prefix: impl AsRef<[u8]>) -> bool {
@@ -295,17 +295,17 @@ impl<V> Txn<V> {
             // the !nc.is_leaf() check in the logic just below. This is pretty subtle,
             // so be careful if you change any of the logic here.
             let nc = self.write_node(&n, false);
-            let nc_ref = nc.as_mut();
             let new_child_ref = new_child.as_ref();
             let new_child_edges = new_child_ref.num_edges();
             // Delete the edge if the node has no edges
             if new_child_ref.leaf().is_none() && new_child_edges == 0 {
               nc.remove_edge(label);
-              if n.ptr() != self.root.ptr() && nc_ref.num_edges() == 1 && !nc.is_leaf() {
+              let nc_ref = nc.as_mut();
+              if n.ptr() != self.root.ptr() && nc_ref.num_edges() == 1 && !nc_ref.is_leaf() {
                 self.merge_child(nc_ref);
               }
             } else {
-              nc_ref.update_edge(ek, new_child);
+              nc.as_mut().update_edge(ek, new_child);
             }
             (Some(nc), leaf)
           }
@@ -329,7 +329,7 @@ impl<V> Txn<V> {
     // Look for an edge
     let label = search[0];
     // We make sure that either the child node's prefix starts with the search term, or the search term starts with the child node's prefix
-	  // Need to do both so that we can delete prefixes that don't correspond to any node in the tree
+    // Need to do both so that we can delete prefixes that don't correspond to any node in the tree
     match n.get_edge(label) {
       None => (None, 0),
       Some((idx, child)) => {
@@ -338,7 +338,7 @@ impl<V> Txn<V> {
         if !child_prefix.starts_with(search) && !search.starts_with(child_prefix) {
           return (None, 0);
         }
-        
+
         // Consume the search prefix
         if child_prefix.len() > search.len() {
           search = &[];
@@ -369,7 +369,7 @@ impl<V> Txn<V> {
             }
 
             (Some(nc), num_deletions)
-          },
+          }
         }
       }
     }
@@ -388,12 +388,9 @@ impl<V> Txn<V> {
     } else {
       RefCell::new(0)
     };
-    
 
     #[cfg(feature = "track")]
-    {
-    
-    }
+    {}
 
     // Recurse on the children
     n.for_each_edge(|n| {

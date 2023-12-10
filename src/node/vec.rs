@@ -50,7 +50,7 @@ impl<T> VecInner<T> {
     } else {
       self.edges.clear();
     }
-  } 
+  }
 }
 
 impl<T> NodeInner<T> for VecInner<T> {

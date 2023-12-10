@@ -15,7 +15,7 @@ name = "foo"
 harness = false
 
 [features]
-default = []
+default = ["std"]
 std = ["bytes/default", "serde?/default", "lru/default"]
 serde = ["dep:serde", "bytes/serde"]
 

@@ -224,7 +224,7 @@ impl<T> Inner<T> {
     }
   }
 
-  fn is_leaf(&self) -> bool {
+  pub(super) fn is_leaf(&self) -> bool {
     match self {
       Self::Vec(v) => v.is_leaf(),
       Self::BTree(v) => v.is_leaf(),
@@ -530,12 +530,12 @@ impl<T> Node<T> {
         v.edges.iter().for_each(|e| {
           f(&e.node);
         });
-      },
+      }
       Inner::BTree(v) => {
         v.edges.iter().for_each(|(_, n)| {
           f(n);
         });
-      },
+      }
     }
   }
 
