@@ -1,4 +1,4 @@
-use core::num::NonZeroUsize;
+use core::{num::NonZeroUsize, cell::RefCell};
 
 use bytes::{Bytes, BytesMut};
 use lru::LruCache;
@@ -84,8 +84,15 @@ impl<V> Txn<V> {
   
   /// Used to delete an entire subtree that matches the prefix
   /// This will delete all nodes under that prefix
-  pub fn remove_prefix(&mut self, k: impl AsRef<[u8]>) -> bool {
-    todo!()
+  pub fn remove_prefix(&mut self, prefix: impl AsRef<[u8]>) -> bool {
+    let root = self.root.clone();
+    let (new_root, num_deletions) = self.remove_prefix_in(&root, prefix.as_ref());
+    if let Some(new_root) = new_root {
+      self.root = new_root;
+      self.size -= num_deletions;
+      return true;
+    }
+    false
   }
 }
 
@@ -307,10 +314,93 @@ impl<V> Txn<V> {
     }
   }
 
+  /// Does a recursive deletion
+  fn remove_prefix_in(&mut self, n: &Node<V>, mut search: &[u8]) -> (Option<Node<V>>, usize) {
+    // Check for key exhaustion
+    if search.is_empty() {
+      let mut nc = self.write_node(&n, true);
+      if n.is_leaf() {
+        nc.clear_leaf();
+      }
+      nc.clear_edges();
+      return (Some(nc), self.track_channels_and_count(n));
+    }
+
+    // Look for an edge
+    let label = search[0];
+    // We make sure that either the child node's prefix starts with the search term, or the search term starts with the child node's prefix
+	  // Need to do both so that we can delete prefixes that don't correspond to any node in the tree
+    match n.get_edge(label) {
+      None => (None, 0),
+      Some((idx, child)) => {
+        let child_ref = child.as_ref();
+        let child_prefix = child_ref.prefix();
+        if !child_prefix.starts_with(search) && !search.starts_with(child_prefix) {
+          return (None, 0);
+        }
+        
+        // Consume the search prefix
+        if child_prefix.len() > search.len() {
+          search = &[];
+        } else {
+          search = &search[child_prefix.len()..];
+        }
+
+        let (new_child, num_deletions) = self.remove_prefix_in(&child, search);
+        match new_child {
+          None => (None, 0),
+          Some(new_child) => {
+            let new_child_ref = new_child.as_mut();
+            // Copy this node. WATCH OUT - it's safe to pass "false" here because we
+            // will only ADD a leaf via nc.mergeChild() if there isn't one due to
+            // the !nc.isLeaf() check in the logic just below. This is pretty subtle,
+            // so be careful if you change any of the logic here.
+            let nc = self.write_node(n, false);
+
+            // Delete the edge if the node has no edges
+            if new_child_ref.leaf().is_none() && new_child_ref.num_edges() == 0 {
+              nc.remove_edge(label);
+              let nc_ref = nc.as_mut();
+              if n.ptr() != self.root.ptr() && nc_ref.num_edges() == 1 && !nc.is_leaf() {
+                self.merge_child(nc_ref);
+              }
+            } else {
+              nc.as_mut().update_edge(idx, new_child);
+            }
+
+            (Some(nc), num_deletions)
+          },
+        }
+      }
+    }
+  }
+
   /// Called to collapse the given node with its child. This is only
   /// called when the given node is not a leaf and has a single edge.
   fn merge_child(&mut self, n: &mut Inner<V>) {
     n.merge_child();
+  }
+
+  fn track_channels_and_count(&self, n: &Node<V>) -> usize {
+    // Count only leaf nodes
+    let mut leaves = if !n.is_leaf() {
+      RefCell::new(1)
+    } else {
+      RefCell::new(0)
+    };
+    
+
+    #[cfg(feature = "track")]
+    {
+    
+    }
+
+    // Recurse on the children
+    n.for_each_edge(|n| {
+      *leaves.borrow_mut() += self.track_channels_and_count(n);
+    });
+
+    leaves.into_inner()
   }
 }
 

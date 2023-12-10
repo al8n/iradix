@@ -92,6 +92,10 @@ impl<T> NodeInner<T> for BTreeInner<T> {
     self.edges.insert(idx, node);
   }
 
+  fn clear_edges(&mut self) {
+    self.edges.clear();
+  }
+
   fn add_edge(&mut self, e: Edge<T>) {
     self.edges.insert(e.label, e.node);
   }

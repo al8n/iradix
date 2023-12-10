@@ -50,7 +50,7 @@ impl<T> VecInner<T> {
     } else {
       self.edges.clear();
     }
-  }
+  } 
 }
 
 impl<T> NodeInner<T> for VecInner<T> {
@@ -86,6 +86,10 @@ impl<T> NodeInner<T> for VecInner<T> {
 
   fn update_edge(&mut self, idx: Self::Key, node: Node<T>) {
     self.edges[idx].node = node;
+  }
+
+  fn clear_edges(&mut self) {
+    self.edges.clear();
   }
 
   fn add_edge(&mut self, e: Edge<T>) {

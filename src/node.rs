@@ -96,7 +96,7 @@ pub(super) trait NodeInner<T> {
 
   fn num_edges(&self) -> usize;
   fn update_edge(&mut self, idx: Self::Key, node: Node<T>);
-
+  fn clear_edges(&mut self);
   fn add_edge(&mut self, e: Edge<T>);
   fn replace_edge(&mut self, e: Edge<T>);
   fn get_edge(&self, label: u8) -> Option<(Self::Key, Node<T>)>;
@@ -521,6 +521,30 @@ impl<T> Node<T> {
   //     })),
   //   }
   // }
+  pub(super) fn for_each_edge<B, F>(&self, f: F)
+  where
+    F: Fn(&Node<T>) -> B,
+  {
+    match self.as_ref() {
+      Inner::Vec(v) => {
+        v.edges.iter().for_each(|e| {
+          f(&e.node);
+        });
+      },
+      Inner::BTree(v) => {
+        v.edges.iter().for_each(|(_, n)| {
+          f(n);
+        });
+      },
+    }
+  }
+
+  pub(super) fn clear_edges(&self) {
+    match self.as_mut() {
+      Inner::Vec(v) => v.clear_edges(),
+      Inner::BTree(v) => v.clear_edges(),
+    }
+  }
 
   pub(super) fn set_leaf(&mut self, leaf: LeafNode<T>) {
     self.as_mut().set_leaf(leaf);

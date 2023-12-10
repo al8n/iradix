@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod node;
 mod txn;
+use bytes::Bytes;
 use node::Inner;
 pub use txn::*;
 
@@ -137,6 +138,49 @@ impl<V> Tree<V> {
       cache: None,
       kind: self.kind,
     }
+  }
+
+  /// Used to lookup a specific key, returning
+  /// the value and if it was found
+  pub fn get(&self, k: impl AsRef<[u8]>) -> Option<&V> {
+    self.root.get(k.as_ref())
+  }
+
+  /// Adds or updates a given key. The return provides
+  /// the new tree, and previous value if any was set.
+  pub fn insert(&self, k: Bytes, v: V) -> (Self, Option<Value<V>>) {
+    let mut txn = self.txn();
+    let prev = txn.insert(k, v);
+    let tree = txn.commit();
+    (tree, prev)
+  }
+
+  /// Removes a given key. Returns the new tree,
+  /// old value if any.
+  pub fn remove(&self, k: impl AsRef<[u8]>) -> (Self, Option<Value<V>>) {
+    let mut txn = self.txn();
+    let prev = txn.remove(k.as_ref());
+    let tree = txn.commit();
+    (tree, prev)
+  }
+
+  /// Used to remove all nodes starting with a given prefix.
+  /// Returns the new tree if the prefix matched any nodes
+  pub fn remove_prefix(&self, prefix: impl AsRef<[u8]>) -> Option<Self> {
+    let mut txn = self.txn();
+    let prev = txn.remove_prefix(prefix.as_ref());
+    let tree = txn.commit();
+    if prev {
+      Some(tree)
+    } else {
+      None
+    }
+  }
+
+  /// Returns the root node of the tree which can be used for richer
+  /// query operations.
+  pub fn root(&self) -> &Node<V> {
+    &self.root
   }
 
   pub(crate) fn kind(&self) -> Kind {
