@@ -1,5 +1,5 @@
 use super::*;
-use crate::concat;
+use crate::{concat, util::Cow};
 
 pub(super) struct BTreeInner<T> {
   /// Used to store possible leaf
@@ -11,7 +11,7 @@ pub(super) struct BTreeInner<T> {
   /// Should be stored in-order for iteration.
   /// We avoid a fully materialized slice to save memory,
   /// since in most cases we expect to be sparse
-  pub(super) edges: BTreeMap<u8, Node<T>>,
+  pub(super) edges: Cow<BTreeMap<u8, Node<T>>>,
 }
 
 impl<T> Default for BTreeInner<T> {
@@ -19,7 +19,7 @@ impl<T> Default for BTreeInner<T> {
     Self {
       leaf: None,
       prefix: Bytes::new(),
-      edges: BTreeMap::new(),
+      edges: Cow::Owned(BTreeMap::new()),
     }
   }
 }
@@ -29,7 +29,7 @@ impl<T> BTreeInner<T> {
   pub(super) fn new(
     prefix: Bytes,
     leaf: Option<LeafNode<T>>,
-    edges: BTreeMap<u8, Node<T>>,
+    edges: Cow<BTreeMap<u8, Node<T>>>,
   ) -> Self {
     Self {
       leaf,
@@ -39,20 +39,42 @@ impl<T> BTreeInner<T> {
   }
 
   pub(super) fn merge_child(&mut self) {
-    // Mark the child node as being mutated since we are about to abandon
-    // it. We don't need to mark the leaf since we are retaining it if it
-    // is there.
-    let (_, node) = self.edges.pop_first().unwrap();
-    // TODO: track
+    match self.edges {
+      Cow::Borrowed(ref t) => {
+        // self.edges = Cow::Owned((**t).clone());
+        // Mark the child node as being mutated since we are about to abandon
+        // it. We don't need to mark the leaf since we are retaining it if it
+        // is there.
+        let (_, node) = t.first_key_value().unwrap();
+        // TODO: track
 
-    let child_ref = node.as_ref().as_btree();
-    // Merge the nodes.
-    self.prefix = concat(&self.prefix, &child_ref.prefix);
-    self.leaf = child_ref.leaf.clone();
-    if !child_ref.edges.is_empty() {
-      self.edges = child_ref.edges.clone();
-    } else {
-      self.edges.clear();
+        let child_ref = node.as_ref().as_btree();
+        // Merge the nodes.
+        self.prefix = concat(&self.prefix, &child_ref.prefix);
+        self.leaf = child_ref.leaf.clone();
+        if !child_ref.edges.is_empty() {
+          self.edges = child_ref.edges.to_borrowed();
+        } else {
+          self.edges = Cow::Owned(BTreeMap::new());
+        }
+      }
+      Cow::Owned(ref mut t) => {
+        // Mark the child node as being mutated since we are about to abandon
+        // it. We don't need to mark the leaf since we are retaining it if it
+        // is there.
+        let (_, node) = t.first_key_value().unwrap();
+        // TODO: track
+
+        let child_ref = node.as_ref().as_btree();
+        // Merge the nodes.
+        self.prefix = concat(&self.prefix, &child_ref.prefix);
+        self.leaf = child_ref.leaf.clone();
+        if !child_ref.edges.is_empty() {
+          self.edges = child_ref.edges.to_borrowed();
+        } else {
+          t.clear();
+        }
+      }
     }
   }
 }

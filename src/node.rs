@@ -105,10 +105,6 @@ pub(super) trait NodeInner<T> {
   fn remove_edge(&mut self, label: u8) -> Option<Node<T>>;
 }
 
-pub(super) trait EdgeInfo<T> {
-  fn node(&self) -> &Node<T>;
-}
-
 #[non_exhaustive]
 pub(super) enum Inner<T> {
   Vec(VecInner<T>),
@@ -139,8 +135,8 @@ impl<T> Inner<T> {
 
   pub(super) fn new_with_empty_edges(prefix: Bytes, leaf: Option<LeafNode<T>>, kind: Kind) -> Self {
     match kind {
-      Kind::Vec => Self::Vec(VecInner::new(prefix, leaf, Vec::new())),
-      Kind::BTree => Self::BTree(BTreeInner::new(prefix, leaf, BTreeMap::new())),
+      Kind::Vec => Self::Vec(VecInner::new(prefix, leaf, Default::default())),
+      Kind::BTree => Self::BTree(BTreeInner::new(prefix, leaf, Default::default())),
     }
   }
 
@@ -164,12 +160,12 @@ impl<T> Inner<T> {
       Self::Vec(v) => Self::Vec(VecInner::new(
         v.prefix.clone(),
         v.leaf.clone(),
-        v.edges.clone(),
+        v.edges.to_borrowed(),
       )),
       Self::BTree(v) => Self::BTree(BTreeInner::new(
         v.prefix.clone(),
         v.leaf.clone(),
-        v.edges.clone(),
+        v.edges.to_borrowed(),
       )),
     }
   }
@@ -295,7 +291,18 @@ impl<T> Inner<T> {
         None
       }
       Self::BTree(v) => {
-        todo!()
+        let mut current = v;
+        loop {
+          if let Some(leaf) = current.leaf() {
+            return Some((&leaf.key, &leaf.val));
+          }
+          if let Some((_, node)) = current.edges.iter().next() {
+            current = node.as_ref().as_btree();
+          } else {
+            break;
+          }
+        }
+        None
       }
     }
   }
@@ -322,7 +329,23 @@ impl<T> Inner<T> {
         None
       }
       Self::BTree(v) => {
-        todo!()
+        let mut current = v;
+        loop {
+          // If the current node is a leaf, return its key and value
+          if let Some(leaf) = current.leaf() {
+            return Some((&leaf.key, &leaf.val));
+          }
+
+          // Otherwise, go to the right-most (maximum) edge
+          if let Some((_, node)) = current.edges.iter().next_back() {
+            current = node.as_ref().as_btree();
+          } else {
+            // No edges to follow, exit the loop
+            break;
+          }
+        }
+
+        None
       }
     }
   }
@@ -467,6 +490,17 @@ impl<T> Node<T> {
 
     last_leaf
   }
+
+  /// Used to walk the tree, but only visiting nodes
+  /// from the root down to a given leaf. Where WalkPrefix walks
+  /// all the entries *under* the given prefix, this walks the
+  /// entries *above* the given prefix.
+  pub fn walk<F>(&self, mut f: F)
+  where
+    F: FnMut(&[u8], &T) -> bool
+  {
+    self.recursive_walk(&mut f);
+  }
 }
 
 impl<T> From<VecInner<T>> for Node<T> {
@@ -501,29 +535,42 @@ impl<T> Node<T> {
     unsafe { &mut *self.ptr.get() }
   }
 
-  // #[inline]
-  // pub(super) fn dangling() -> Self {
-  //   Self {
-  //     ptr: Arc::new(UnsafeCell::new(VecInner {
-  //       leaf: None,
-  //       prefix: Bytes::new(),
-  //       edges: Default::default(),
-  //     })),
-  //   }
-  // }
-
-  // pub(super) fn new(prefix: Bytes, edges: Vec<Edge<T>>) -> Self {
-  //   Self {
-  //     ptr: Arc::new(UnsafeCell::new(VecInner {
-  //       leaf: None,
-  //       prefix,
-  //       edges,
-  //     })),
-  //   }
-  // }
-  pub(super) fn for_each_edge<B, F>(&self, f: F)
+  fn recursive_walk<F>(&self, f: &mut F) -> bool
   where
-    F: Fn(&Node<T>) -> B,
+    F: FnMut(&[u8], &T) -> bool
+  {
+    // Visit the leaf values if any
+    if let Some(leaf) = self.as_ref().leaf() {
+      if f(&leaf.key, &leaf.val) {
+        return true;
+      } else {
+        return false;
+      }
+    }
+
+    // Recurse on the children
+    match self.as_ref() {
+      Inner::Vec(v) => {
+        for e in v.edges.iter() {
+          if e.node.recursive_walk(f) {
+            return true;
+          }
+        }
+      },
+      Inner::BTree(t) => {
+        for (_, n) in t.edges.iter() {
+          if n.recursive_walk(f) {
+            return true;
+          }
+        }
+      },
+    }
+    false
+  }
+
+  pub(super) fn for_each_edge<F>(&self, f: F)
+  where
+    F: Fn(&Node<T>),
   {
     match self.as_ref() {
       Inner::Vec(v) => {
@@ -539,6 +586,19 @@ impl<T> Node<T> {
     }
   }
 
+  pub(super) fn first_child(&self) -> Option<&Node<T>>
+  {
+    match self.as_ref() {
+      Inner::Vec(v) => {
+        v.edges.iter().next().map(|e| &e.node)
+      }
+      Inner::BTree(v) => {
+        v.edges.iter().next().map(|(_, n)| n)
+      }
+    }
+  }
+
+
   pub(super) fn clear_edges(&self) {
     match self.as_mut() {
       Inner::Vec(v) => v.clear_edges(),
@@ -548,6 +608,10 @@ impl<T> Node<T> {
 
   pub(super) fn set_leaf(&mut self, leaf: LeafNode<T>) {
     self.as_mut().set_leaf(leaf);
+  }
+
+  pub(super) fn leaf(&self) -> Option<&LeafNode<T>> {
+    self.as_ref().leaf()
   }
 
   pub(super) fn clear_leaf(&mut self) {

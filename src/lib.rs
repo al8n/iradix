@@ -13,6 +13,7 @@ mod txn;
 use bytes::Bytes;
 use node::Inner;
 pub use txn::*;
+mod util;
 
 #[cfg(test)]
 mod tests;

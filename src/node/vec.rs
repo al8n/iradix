@@ -1,5 +1,5 @@
 use super::*;
-use crate::concat;
+use crate::{concat, util::Cow};
 
 pub(super) struct VecInner<T> {
   /// Used to store possible leaf
@@ -11,7 +11,7 @@ pub(super) struct VecInner<T> {
   /// Should be stored in-order for iteration.
   /// We avoid a fully materialized slice to save memory,
   /// since in most cases we expect to be sparse
-  pub(super) edges: Vec<Edge<T>>,
+  pub(super) edges: Cow<Vec<Edge<T>>>,
 }
 
 impl<T> Default for VecInner<T> {
@@ -19,14 +19,14 @@ impl<T> Default for VecInner<T> {
     Self {
       leaf: None,
       prefix: Bytes::new(),
-      edges: Vec::new(),
+      edges: Cow::Owned(Vec::new()),
     }
   }
 }
 
 impl<T> VecInner<T> {
   #[inline]
-  pub(super) fn new(prefix: Bytes, leaf: Option<LeafNode<T>>, edges: Vec<Edge<T>>) -> Self {
+  pub(super) fn new(prefix: Bytes, leaf: Option<LeafNode<T>>, edges: Cow<Vec<Edge<T>>>) -> Self {
     Self {
       leaf,
       prefix,
@@ -38,17 +38,35 @@ impl<T> VecInner<T> {
     // Mark the child node as being mutated since we are about to abandon
     // it. We don't need to mark the leaf since we are retaining it if it
     // is there.
-    let e = self.edges.pop().unwrap();
-    // TODO: track
+    match self.edges {
+      Cow::Borrowed(ref edges) => {
+        let e = &edges[0];
+        // TODO: track
 
-    let child_ref = e.node.as_ref().as_vec();
-    // Merge the nodes.
-    self.prefix = concat(&self.prefix, &child_ref.prefix);
-    self.leaf = child_ref.leaf.clone();
-    if !child_ref.edges.is_empty() {
-      self.edges = child_ref.edges.clone();
-    } else {
-      self.edges.clear();
+        let child_ref = e.node.as_ref().as_vec();
+        // Merge the nodes.
+        self.prefix = concat(&self.prefix, &child_ref.prefix);
+        self.leaf = child_ref.leaf.clone();
+        if !child_ref.edges.is_empty() {
+          self.edges = child_ref.edges.to_borrowed();
+        } else {
+          self.edges = Cow::Owned(Vec::new());
+        }
+      }
+      Cow::Owned(ref mut edges) => {
+        let e = &edges[0];
+        // TODO: track
+
+        let child_ref = e.node.as_ref().as_vec();
+        // Merge the nodes.
+        self.prefix = concat(&self.prefix, &child_ref.prefix);
+        self.leaf = child_ref.leaf.clone();
+        if !child_ref.edges.is_empty() {
+          self.edges = child_ref.edges.to_borrowed();
+        } else {
+          edges.clear();
+        }
+      }
     }
   }
 }
