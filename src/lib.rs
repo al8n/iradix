@@ -188,3 +188,13 @@ impl<V> Tree<V> {
     self.kind
   }
 }
+
+impl<V> Tree<V> {
+  #[cfg(test)]
+  fn new_with_kind(kind: Kind) -> Self {
+    match kind {
+      Kind::Vec => Self::vec(),
+      Kind::BTree => Self::btree(),
+    }
+  }
+}

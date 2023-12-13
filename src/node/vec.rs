@@ -1,6 +1,7 @@
 use super::*;
 use crate::{concat, util::Cow};
 
+#[derive(Debug)]
 pub(super) struct VecInner<T> {
   /// Used to store possible leaf
   pub(super) leaf: Option<LeafNode<T>>,
@@ -111,23 +112,20 @@ impl<T> NodeInner<T> for VecInner<T> {
   }
 
   fn add_edge(&mut self, e: Edge<T>) {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= e.label);
+    let idx = self
+      .edges
+      .binary_search_by(|edge| edge.label.cmp(&e.label))
+      .unwrap_or_else(|x| x);
 
-    if idx != num {
-      self.edges.insert(idx, e);
-    } else {
-      self.edges.push(e);
-    }
+    self.edges.insert(idx, e);
   }
 
   fn replace_edge(&mut self, e: Edge<T>) {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= e.label);
-    if idx < num && self.edges[idx].label == e.label {
-      self.edges[idx].node = e.node;
-    } else {
-      panic!("replacing missing edge");
+    let idx = self.edges.binary_search_by(|edge| edge.label.cmp(&e.label));
+
+    match idx {
+      Ok(index) => self.edges[index].node = e.node,
+      Err(_) => panic!("replacing missing edge"),
     }
   }
 
@@ -138,30 +136,19 @@ impl<T> NodeInner<T> for VecInner<T> {
   }
 
   fn get_edge_ref(&self, label: u8) -> Option<(Self::Key, &Node<T>)> {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= label);
-    if idx < num && self.edges[idx].label == label {
-      Some((idx, &self.edges[idx].node))
-    } else {
-      None
-    }
+    let idx = self.edges.binary_search_by(|edge| edge.label.cmp(&label));
+    idx.ok().map(|index| (index, &self.edges[index].node))
   }
 
   fn get_lower_bound_edge(&self, label: u8) -> Option<Node<T>> {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= label);
-    if idx < num {
-      Some(self.edges[idx].node.clone())
-    } else {
-      None
-    }
+    let idx = self.edges.partition_point(|edge| edge.label < label);
+    self.edges.get(idx).map(|edge| edge.node.clone())
   }
 
   fn remove_edge(&mut self, label: u8) -> Option<Node<T>> {
-    let num = self.edges.len();
-    let idx = indexsort::search(num, |i| self.edges[i].label >= label);
-    if idx < num && self.edges[idx].label == label {
-      Some(self.edges.remove(idx).node)
+    let idx = self.edges.binary_search_by(|edge| edge.label.cmp(&label));
+    if let Ok(index) = idx {
+      Some(self.edges.remove(index).node)
     } else {
       None
     }

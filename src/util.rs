@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+
 use crate::sync::Arc;
 
 pub enum Cow<T> {
@@ -36,6 +38,15 @@ impl<T: Clone> Cow<T> {
     match self {
       Cow::Borrowed(t) => Cow::Borrowed(t.clone()),
       Cow::Owned(t) => Cow::Borrowed(Arc::new(t.clone())),
+    }
+  }
+}
+
+impl<T: Debug> Debug for Cow<T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    match self {
+      Cow::Borrowed(t) => f.debug_tuple("Cow::Borrowed").field(t).finish(),
+      Cow::Owned(t) => f.debug_tuple("Cow::Owned").field(t).finish(),
     }
   }
 }

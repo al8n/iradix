@@ -1,6 +1,6 @@
 use core::{cell::UnsafeCell, fmt::Debug};
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 
 use crate::Kind;
 
@@ -119,7 +119,21 @@ impl<T> Inner<T> {
     }
   }
 
+  fn as_vec_mut(&mut self) -> &mut VecInner<T> {
+    match self {
+      Self::Vec(v) => v,
+      _ => panic!("Inner::as_vec called on non-Vec"),
+    }
+  }
+
   fn as_btree(&self) -> &BTreeInner<T> {
+    match self {
+      Self::BTree(v) => v,
+      _ => panic!("Inner::as_btree called on non-BTree"),
+    }
+  }
+
+  fn as_btree_mut(&mut self) -> &mut BTreeInner<T> {
     match self {
       Self::BTree(v) => v,
       _ => panic!("Inner::as_btree called on non-BTree"),
@@ -283,7 +297,7 @@ impl<T> Inner<T> {
           }
           let num_edges = current.num_edges();
           if num_edges > 0 {
-            current = v.edges[0].node.as_ref().as_vec();
+            current = current.edges[0].node.as_ref().as_vec();
           } else {
             break;
           }
@@ -314,12 +328,12 @@ impl<T> Inner<T> {
         loop {
           let num = current.num_edges();
           if num > 0 {
-            current = v.edges[num - 1].node.as_ref().as_vec();
+            current = current.edges[num - 1].node.as_ref().as_vec();
             continue;
           }
 
           // If the current node is a leaf, return its key and value
-          if let Some(leaf) = &v.leaf {
+          if let Some(leaf) = &current.leaf {
             return Some((&leaf.key, &leaf.val));
           } else {
             break;
@@ -497,7 +511,7 @@ impl<T> Node<T> {
   /// entries *above* the given prefix.
   pub fn walk<F>(&self, mut f: F)
   where
-    F: FnMut(&[u8], &T) -> bool
+    F: FnMut(&[u8], &T) -> bool,
   {
     self.recursive_walk(&mut f);
   }
@@ -537,7 +551,7 @@ impl<T> Node<T> {
 
   fn recursive_walk<F>(&self, f: &mut F) -> bool
   where
-    F: FnMut(&[u8], &T) -> bool
+    F: FnMut(&[u8], &T) -> bool,
   {
     // Visit the leaf values if any
     if let Some(leaf) = self.as_ref().leaf() {
@@ -556,14 +570,14 @@ impl<T> Node<T> {
             return true;
           }
         }
-      },
+      }
       Inner::BTree(t) => {
         for (_, n) in t.edges.iter() {
           if n.recursive_walk(f) {
             return true;
           }
         }
-      },
+      }
     }
     false
   }
@@ -586,18 +600,12 @@ impl<T> Node<T> {
     }
   }
 
-  pub(super) fn first_child(&self) -> Option<&Node<T>>
-  {
+  pub(super) fn first_child(&self) -> Option<&Node<T>> {
     match self.as_ref() {
-      Inner::Vec(v) => {
-        v.edges.iter().next().map(|e| &e.node)
-      }
-      Inner::BTree(v) => {
-        v.edges.iter().next().map(|(_, n)| n)
-      }
+      Inner::Vec(v) => v.edges.iter().next().map(|e| &e.node),
+      Inner::BTree(v) => v.edges.iter().next().map(|(_, n)| n),
     }
   }
-
 
   pub(super) fn clear_edges(&self) {
     match self.as_mut() {
@@ -646,4 +654,50 @@ impl<T> Node<T> {
   pub(super) fn remove_edge(&self, label: u8) -> Option<Node<T>> {
     self.as_mut().remove_edge(label)
   }
+}
+
+#[cfg(test)]
+pub(crate) fn copy_node<T>(n: &Node<T>) -> Node<T> {
+  let mut nn = Node {
+    ptr: Arc::new(UnsafeCell::new(match n.as_ref() {
+      Inner::Vec(v) => Inner::Vec(Default::default()),
+      Inner::BTree(v) => Inner::BTree(Default::default()),
+    })),
+  };
+
+  // TODO: track
+
+  if n.as_ref().prefix().len() > 0 {
+    nn.as_mut().set_prefix(n.as_ref().prefix().clone());
+  }
+
+  if let Some(leaf) = n.as_ref().leaf() {
+    nn.as_mut().set_leaf(leaf.clone());
+  }
+
+  match n.as_ref() {
+    Inner::Vec(n) => {
+      let nn_ref = nn.as_mut().as_vec_mut();
+      for e in n.edges.iter() {
+        nn_ref.edges.push(Edge::new(e.label, copy_node(&e.node)));
+      }
+    }
+    Inner::BTree(n) => {
+      let nn_ref = nn.as_mut().as_btree_mut();
+      for (label, node) in n.edges.iter() {
+        nn_ref.edges.insert(*label, copy_node(node));
+      }
+    }
+  }
+  nn
+}
+
+#[test]
+fn test_() {
+  let b = Bytes::new();
+  let n = Node::<()>::from(Inner::new_with_empty_edges(b.clone(), None, Kind::Vec));
+
+  let n1 = Node::<()>::from(Inner::new_with_empty_edges(b.clone(), None, Kind::Vec));
+
+  println!("{} {}", n.ptr(), n1.ptr());
 }
