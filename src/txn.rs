@@ -1,4 +1,8 @@
-use core::{cell::RefCell, num::NonZeroUsize};
+use core::{
+  cell::RefCell,
+  hash::{BuildHasher, Hash, Hasher},
+  num::NonZeroUsize,
+};
 
 use bytes::{Bytes, BytesMut};
 use lru::LruCache;
@@ -30,7 +34,19 @@ pub struct Txn<V, S = lru::DefaultHasher> {
   pub(super) cache: Option<LruCache<usize, Node<V>, S>>,
 }
 
-impl<V> Txn<V> {
+impl<V, S> Clone for Txn<V, S> {
+  fn clone(&self) -> Self {
+    Self {
+      root: self.root.clone(),
+      snap: self.snap.clone(),
+      size: self.size,
+      kind: self.kind,
+      cache: None,
+    }
+  }
+}
+
+impl<V, S> Txn<V, S> {
   /// Finalize the transaction and return a new tree. If mutation
   /// tracking is turned on then notifications will also be issued.
   #[cfg(feature = "std")]
@@ -47,7 +63,9 @@ impl<V> Txn<V> {
       kind: self.kind,
     }
   }
+}
 
+impl<V, S: Default + BuildHasher> Txn<V, S> {
   /// Used to lookup a specific key, returning
   /// the value and if it was found
   pub fn get(&self, k: impl AsRef<[u8]>) -> Option<&V> {
@@ -96,15 +114,16 @@ impl<V> Txn<V> {
   }
 }
 
-impl<V> Txn<V> {
+impl<V, S: Default + BuildHasher> Txn<V, S> {
   /// Returns a node to be modified, if the current node has already been
   /// modified during the course of the transaction, it is used in-place. Set
   /// `for_leaf_update` to true if you are getting a write node to update the leaf,
   /// which will set leaf mutation tracking appropriately as well.
   fn write_node(&mut self, n: &Node<V>, for_leaf_update: bool) -> Node<V> {
     // Ensure the writable set exists.
-    let cache = self.cache.get_or_insert(LruCache::new(
+    let cache = self.cache.get_or_insert(LruCache::with_hasher(
       NonZeroUsize::new(DEFAULT_MODIFIED_CACHE).unwrap(),
+      Default::default(),
     ));
 
     // If this node has already been modified, we can continue to use it
@@ -160,6 +179,7 @@ impl<V> Txn<V> {
 
     // Look for the edge
     match n.get_edge(search[0]) {
+      // No edge, create one
       None => {
         let e = Edge::new(
           search[0],
@@ -184,7 +204,6 @@ impl<V> Txn<V> {
 
         if common_prefix == child_prefix.len() {
           search = search.slice(common_prefix..);
-          let prefix = search[0];
           let (new_child, old_val) = self.insert_in(child, key, search, val);
 
           if let Some(new_child) = new_child {
@@ -256,7 +275,7 @@ impl<V> Txn<V> {
           // modified this node since the node will be reused. Any changes
           // made to the node will not affect returning the original leaf
           // value.
-          let mut old_leaf = leaf.clone();
+          let old_leaf = leaf.clone();
 
           // Remove the leaf node
           let mut nc = self.write_node(&n, true);
@@ -288,7 +307,7 @@ impl<V> Txn<V> {
         search = &search[child_prefix.len()..];
         let (new_child, leaf) = self.remove_in(child, search);
         match new_child {
-          None => return (None, None),
+          None => (None, None),
           Some(new_child) => {
             // Copy this node. WATCH OUT - it's safe to pass "false" here because we
             // will only ADD a leaf via nc.merge_child() if there isn't one due to
@@ -318,7 +337,7 @@ impl<V> Txn<V> {
   fn remove_prefix_in(&mut self, n: &Node<V>, mut search: &[u8]) -> (Option<Node<V>>, usize) {
     // Check for key exhaustion
     if search.is_empty() {
-      let mut nc = self.write_node(&n, true);
+      let mut nc = self.write_node(n, true);
       if n.is_leaf() {
         nc.clear_leaf();
       }
@@ -383,7 +402,7 @@ impl<V> Txn<V> {
 
   fn track_channels_and_count(&self, n: &Node<V>) -> usize {
     // Count only leaf nodes
-    let mut leaves = if !n.is_leaf() {
+    let leaves = if !n.is_leaf() {
       RefCell::new(1)
     } else {
       RefCell::new(0)

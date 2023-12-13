@@ -1,14 +1,14 @@
 use core::{cell::UnsafeCell, fmt::Debug};
 
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 
 use crate::Kind;
 
 use self::{btree::BTreeInner, vec::VecInner};
 
 use super::{
-  maybestd::{boxed::Box, vec::Vec, BTreeMap},
-  sync::{Arc, AtomicUsize, Ordering},
+  maybestd::{vec::Vec, BTreeMap},
+  sync::Arc,
 };
 
 mod btree;
@@ -119,13 +119,6 @@ impl<T> Inner<T> {
     }
   }
 
-  fn as_vec_mut(&mut self) -> &mut VecInner<T> {
-    match self {
-      Self::Vec(v) => v,
-      _ => panic!("Inner::as_vec called on non-Vec"),
-    }
-  }
-
   fn as_btree(&self) -> &BTreeInner<T> {
     match self {
       Self::BTree(v) => v,
@@ -133,6 +126,15 @@ impl<T> Inner<T> {
     }
   }
 
+  #[cfg(test)]
+  fn as_vec_mut(&mut self) -> &mut VecInner<T> {
+    match self {
+      Self::Vec(v) => v,
+      _ => panic!("Inner::as_vec called on non-Vec"),
+    }
+  }
+
+  #[cfg(test)]
   fn as_btree_mut(&mut self) -> &mut BTreeInner<T> {
     match self {
       Self::BTree(v) => v,
@@ -515,6 +517,42 @@ impl<T> Node<T> {
   {
     self.recursive_walk(&mut f);
   }
+
+  /// Used to walk the tree under a prefix
+  pub fn walk_prefix<F>(&self, prefix: impl AsRef<[u8]>, mut f: F)
+  where
+    F: FnMut(&[u8], &T) -> bool,
+  {
+    let mut search = prefix.as_ref();
+    let mut current = self;
+    loop {
+      // Check for key exhaustion
+      if search.is_empty() {
+        current.recursive_walk(&mut f);
+        return;
+      }
+
+      // Look for an edge
+      match current.get_edge_ref(search[0]) {
+        Some((_, node)) => {
+          // Consume the search prefix
+          current = node;
+          let current_ref = current.as_ref();
+          let current_prefix = current_ref.prefix();
+          if search.starts_with(current_prefix) {
+            search = &search[current_prefix.len()..];
+          } else if current_prefix.starts_with(search) {
+            // Child may be under our search prefix
+            current.recursive_walk(&mut f);
+            return;
+          } else {
+            return;
+          }
+        }
+        None => return, // Edge not found; stop searching
+      }
+    }
+  }
 }
 
 impl<T> From<VecInner<T>> for Node<T> {
@@ -555,11 +593,7 @@ impl<T> Node<T> {
   {
     // Visit the leaf values if any
     if let Some(leaf) = self.as_ref().leaf() {
-      if f(&leaf.key, &leaf.val) {
-        return true;
-      } else {
-        return false;
-      }
+      return f(&leaf.key, &leaf.val);
     }
 
     // Recurse on the children
@@ -597,13 +631,6 @@ impl<T> Node<T> {
           f(n);
         });
       }
-    }
-  }
-
-  pub(super) fn first_child(&self) -> Option<&Node<T>> {
-    match self.as_ref() {
-      Inner::Vec(v) => v.edges.iter().next().map(|e| &e.node),
-      Inner::BTree(v) => v.edges.iter().next().map(|(_, n)| n),
     }
   }
 
@@ -658,16 +685,16 @@ impl<T> Node<T> {
 
 #[cfg(test)]
 pub(crate) fn copy_node<T>(n: &Node<T>) -> Node<T> {
-  let mut nn = Node {
+  let nn = Node {
     ptr: Arc::new(UnsafeCell::new(match n.as_ref() {
-      Inner::Vec(v) => Inner::Vec(Default::default()),
-      Inner::BTree(v) => Inner::BTree(Default::default()),
+      Inner::Vec(_) => Inner::Vec(Default::default()),
+      Inner::BTree(_) => Inner::BTree(Default::default()),
     })),
   };
 
   // TODO: track
 
-  if n.as_ref().prefix().len() > 0 {
+  if !n.as_ref().prefix().is_empty() {
     nn.as_mut().set_prefix(n.as_ref().prefix().clone());
   }
 
@@ -690,14 +717,4 @@ pub(crate) fn copy_node<T>(n: &Node<T>) -> Node<T> {
     }
   }
   nn
-}
-
-#[test]
-fn test_() {
-  let b = Bytes::new();
-  let n = Node::<()>::from(Inner::new_with_empty_edges(b.clone(), None, Kind::Vec));
-
-  let n1 = Node::<()>::from(Inner::new_with_empty_edges(b.clone(), None, Kind::Vec));
-
-  println!("{} {}", n.ptr(), n1.ptr());
 }

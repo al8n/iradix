@@ -2,7 +2,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
-#![allow(warnings)]
 #![deny(missing_docs)]
 
 #[cfg(not(feature = "std"))]
@@ -182,19 +181,5 @@ impl<V> Tree<V> {
   /// query operations.
   pub fn root(&self) -> &Node<V> {
     &self.root
-  }
-
-  pub(crate) fn kind(&self) -> Kind {
-    self.kind
-  }
-}
-
-impl<V> Tree<V> {
-  #[cfg(test)]
-  fn new_with_kind(kind: Kind) -> Self {
-    match kind {
-      Kind::Vec => Self::vec(),
-      Kind::BTree => Self::btree(),
-    }
   }
 }

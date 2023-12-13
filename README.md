@@ -32,10 +32,13 @@ As a radix tree, it provides the following:
 
 - Ordered iteration
 
-A tree supports using a transaction to batch multiple updates (insert, delete)
+- Two kinds of tree: `Vec` based and `BTreeMap` based for different usecases.
+
+A tree supports using a transaction to batch multiple updates (`insert`, `remove`)
 in a more efficient manner than performing each operation one at a time.
 
 ## Installation
+
 ```toml
 [dependencies]
 iradix = "0.1"
