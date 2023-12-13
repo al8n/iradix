@@ -7,10 +7,13 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-mod node;
-mod txn;
 use bytes::Bytes;
 use node::Inner;
+
+mod iter;
+pub use iter::*;
+mod node;
+mod txn;
 pub use txn::*;
 mod util;
 
