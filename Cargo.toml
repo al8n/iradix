@@ -24,6 +24,7 @@ bytes = { version = "1", default-features = false }
 lru = { version = "0.12", default-features = false }
 indexsort = "0.1"
 crossbeam-channel = { version = "0.5", optional = true }
+crossbeam-epoch = "0.9"
 
 serde = { version = "1.0", optional = true, default-features = false, features = ["derive"] }
 
