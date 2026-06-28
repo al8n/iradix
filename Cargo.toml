@@ -1,40 +1,39 @@
 [package]
 name = "iradix"
-version = "0.0.1"
-edition = "2021"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
 repository = "https://github.com/al8n/iradix"
 homepage = "https://github.com/al8n/iradix"
 documentation = "https://docs.rs/iradix"
-description = "A placeholder"
-license = "MPL-2.0"
-rust-version = "1.73"
-
-[[bench]]
-path = "benches/foo.rs"
-name = "foo"
-harness = false
+description = "A generic, persistent (copy-on-write) radix trie with structural sharing — bring-your-own-key, no_std + alloc, parameterized over Rc/Arc."
+license = "MIT OR Apache-2.0"
+categories = ["data-structures", "no-std", "concurrency"]
+keywords = ["radix", "trie", "persistent", "immutable", "copy-on-write"]
 
 [features]
 default = ["std"]
-std = ["bytes/default", "serde?/default", "lru/default"]
-serde = ["dep:serde", "bytes/serde"]
+# `std` and `alloc` are INDEPENDENT: `std` does not imply `alloc`. `archery`
+# always provides the heap (`Rc`/`Arc`) and has no std/alloc feature of its own,
+# so each tier only layers on its own lock backend.
+std = ["dep:arc-swap"]
+alloc = ["dep:spin"]
+lockfree-nostd = ["dep:haphazard"]
 
 [dependencies]
-bytes = { version = "1", default-features = false }
-lru = { version = "0.12", default-features = false }
-indexsort = "0.1"
-crossbeam-channel = { version = "0.5", optional = true }
-crossbeam-epoch = "0.9"
-
-serde = { version = "1.0", optional = true, default-features = false, features = ["derive"] }
+archery = { version = "1", default-features = false }
+arc-swap = { version = "1", optional = true }
+spin = { version = "0.10", optional = true, default-features = false, features = [
+  "rwlock",
+] }
+haphazard = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
-criterion = "0.5"
-tempfile = "3"
-uuid = { version = "1", features = ["v4"] }
+proptest = "1"
 
-[target.'cfg(loom)'.dependencies]
-loom = "0.7"
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [profile.bench]
 opt-level = 3
@@ -45,7 +44,3 @@ incremental = false
 debug-assertions = false
 overflow-checks = false
 rpath = false
-
-[package.metadata.docs.rs]
-all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
