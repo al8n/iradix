@@ -19,7 +19,7 @@
 
 use std::{borrow::ToOwned, boxed::Box, vec, vec::Vec};
 
-use core::borrow::Borrow;
+use core::{borrow::Borrow, cmp::Ordering, ops::Bound};
 
 use archery::{SharedPointer, SharedPointerKind};
 
@@ -228,14 +228,19 @@ where
     ValueIter::from_stack(std::vec![self])
   }
 
-  /// Iterates references to the values of every *strict* descendant of `key`.
+  /// Iterates references to the values of every *strict* descendant of `key`, in
+  /// key order.
   #[inline]
   pub(crate) fn descendant_iter<I>(&self, key: I) -> ValueIter<'_, P, C, V>
   where
     I: Iterator,
     I::Item: Borrow<C>,
   {
-    ValueIter::from_stack(self.descendant_roots(key))
+    // `ValueIter` pops from the back, so the seed roots (collected in ascending
+    // first-component order) are reversed to make the smallest subtree pop first.
+    let mut roots = self.descendant_roots(key);
+    roots.reverse();
+    ValueIter::from_stack(roots)
   }
 
   /// Returns the subtree roots whose union is exactly the *strict* descendants of
@@ -265,6 +270,83 @@ where
       } else {
         return Vec::new();
       }
+    }
+  }
+
+  /// Returns the smallest key in this subtree (component lexicographic order) and
+  /// its value. A node's own value precedes all its descendants, so the minimum is
+  /// found by taking each node's value if present, else descending into its
+  /// smallest (first) child.
+  fn minimum(&self) -> Option<(Vec<C::Owned>, &V)> {
+    let mut node = self;
+    let mut key: Vec<C::Owned> = Vec::new();
+    loop {
+      if let Some(v) = node.value.as_ref() {
+        return Some((key, v));
+      }
+      let edge = node.children.first()?;
+      extend_key::<C>(&mut key, &edge.label);
+      node = &edge.child;
+    }
+  }
+
+  /// Returns the largest key in this subtree (component lexicographic order) and
+  /// its value. Every descendant outranks a node's own value, so the maximum lives
+  /// in the largest (last) child whenever one exists, and is a node's own value
+  /// only at a childless leaf.
+  fn maximum(&self) -> Option<(Vec<C::Owned>, &V)> {
+    let mut node = self;
+    let mut key: Vec<C::Owned> = Vec::new();
+    loop {
+      match node.children.last() {
+        Some(edge) => {
+          extend_key::<C>(&mut key, &edge.label);
+          node = &edge.child;
+        }
+        None => return node.value.as_ref().map(|v| (key, v)),
+      }
+    }
+  }
+
+  /// Iterates references to every value in this subtree, in reverse key order.
+  #[inline]
+  fn rev_value_iter(&self) -> RevValueIter<'_, P, C, V> {
+    RevValueIter::from_nodes(std::vec![self])
+  }
+
+  /// Iterates references to the values of every *strict* descendant of `key`, in
+  /// reverse key order.
+  #[inline]
+  fn descendant_rev_iter<I>(&self, key: I) -> RevValueIter<'_, P, C, V>
+  where
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
+    RevValueIter::from_nodes(self.descendant_roots(key))
+  }
+
+  /// Builds an ascending cursor over the entries whose key lies within
+  /// `[lower, upper]` (each end honoring its [`Bound`] kind). The lower bound is
+  /// resolved eagerly here (descending the trie and seeding only the subtrees at
+  /// or past it); the upper bound is checked lazily as the cursor advances.
+  fn range_iter(
+    &self,
+    lower: Bound<Vec<C::Owned>>,
+    upper: Bound<Vec<C::Owned>>,
+  ) -> RangeIter<'_, P, C, V> {
+    let mut stack = Vec::new();
+    match &lower {
+      Bound::Unbounded => stack.push(RangeFrame::Node {
+        node: self,
+        key: Vec::new(),
+      }),
+      Bound::Included(lb) => seed_lower(&mut stack, self, Vec::new(), lb, true),
+      Bound::Excluded(lb) => seed_lower(&mut stack, self, Vec::new(), lb, false),
+    }
+    RangeIter {
+      stack,
+      upper,
+      done: false,
     }
   }
 }
@@ -456,6 +538,67 @@ where
       0
     }
   }
+
+  /// Unlinks the value at `key` *and* every strict descendant (the whole subtree
+  /// rooted at `key`), copying on write and re-compressing. Returns the number of
+  /// values removed and decrements `*len` by that amount.
+  ///
+  /// This is the node-inclusive counterpart to [`unlink_descendants`]: it also
+  /// drops the value stored exactly at `key`. The same panic-safety contract
+  /// holds — `len` is corrected atomically with the (infallible) clear/unlink,
+  /// after the fallible make-mut/traversal and before the (fallible, but
+  /// label-MOVING and therefore user-panic-free) `normalize_child` on the way up.
+  ///
+  /// [`unlink_descendants`]: Node::unlink_descendants
+  pub(crate) fn unlink_prefix(
+    node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
+    key: &[C::Owned],
+    len: &mut usize,
+  ) -> usize {
+    let node = SharedPointer::make_mut(node_ptr);
+
+    let Some(first) = key.first() else {
+      // `key` ends here: this whole node is the prefix root — drop its value and
+      // every descendant. Counting and clearing are infallible, so `len` is
+      // corrected atomically with the unlink. The parent prunes the now-empty edge
+      // (or, at the root, the empty node is the canonical empty trie).
+      let removed = usize::from(node.value.is_some())
+        + node
+          .children
+          .iter()
+          .map(|edge| edge.child.count())
+          .sum::<usize>();
+      *len -= removed;
+      node.value = None;
+      node.children.clear();
+      return removed;
+    };
+
+    let Ok(i) = node.child_index(first.borrow()) else {
+      return 0;
+    };
+    let shared = common_len::<C>(&node.children[i].label, key);
+    let label_len = node.children[i].label.len();
+
+    if shared == label_len {
+      // Whole label consumed: recurse, then re-canonicalize this node (which may
+      // now have a pruned-empty or single-child child).
+      let removed = Node::unlink_prefix(&mut node.children[i].child, &key[shared..], len);
+      if removed > 0 {
+        normalize_child(node, i);
+      }
+      removed
+    } else if shared == key.len() {
+      // `key` ends mid-edge: the whole child subtree is at or below `key`.
+      let removed = node.children[i].child.count();
+      *len -= removed;
+      node.children.remove(i);
+      removed
+    } else {
+      // `key` diverges from this edge — nothing matches, no change.
+      0
+    }
+  }
 }
 
 /// The persistent-radix state shared by both public faces: a lazily-allocated
@@ -581,6 +724,55 @@ where
       None => ValueIter::empty(),
     }
   }
+
+  /// Returns the smallest key (component lexicographic order) and its value.
+  #[inline]
+  pub(crate) fn minimum(&self) -> Option<(Vec<C::Owned>, &V)> {
+    self.root.as_ref()?.minimum()
+  }
+
+  /// Returns the largest key (component lexicographic order) and its value.
+  #[inline]
+  pub(crate) fn maximum(&self) -> Option<(Vec<C::Owned>, &V)> {
+    self.root.as_ref()?.maximum()
+  }
+
+  /// Iterates references to every value in the trie, in reverse key order.
+  #[inline]
+  pub(crate) fn values_rev(&self) -> RevValueIter<'_, P, C, V> {
+    match self.root.as_ref() {
+      Some(root) => root.rev_value_iter(),
+      None => RevValueIter::empty(),
+    }
+  }
+
+  /// Iterates references to the values of `key`'s strict descendants, in reverse
+  /// key order.
+  #[inline]
+  pub(crate) fn descendants_rev<I>(&self, key: I) -> RevValueIter<'_, P, C, V>
+  where
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
+    match self.root.as_ref() {
+      Some(root) => root.descendant_rev_iter(key),
+      None => RevValueIter::empty(),
+    }
+  }
+
+  /// Iterates `(key, value)` for every entry whose key lies within
+  /// `[lower, upper]`, in ascending key order.
+  #[inline]
+  pub(crate) fn range(
+    &self,
+    lower: Bound<Vec<C::Owned>>,
+    upper: Bound<Vec<C::Owned>>,
+  ) -> RangeIter<'_, P, C, V> {
+    match self.root.as_ref() {
+      Some(root) => root.range_iter(lower, upper),
+      None => RangeIter::empty(),
+    }
+  }
 }
 
 impl<P, C, V> Root<P, C, V>
@@ -656,6 +848,60 @@ where
     // `unlink_descendants` corrects `len` atomically with the (infallible) unlink.
     if let Some(root) = self.root.as_mut() {
       Node::unlink_descendants(root, components, &mut self.len);
+    }
+    out
+  }
+
+  /// Removes the value at `key` *and* every strict descendant (node-inclusive),
+  /// returning the number of values removed. Never clones a `V`.
+  pub(crate) fn delete_prefix(&mut self, components: &[C::Owned]) -> usize {
+    // Read-only existence check: if nothing is stored at or below `key`, there is
+    // nothing to remove, so skip the copy-on-write entirely (preserving structural
+    // sharing) and leave `len` alone. The traversal is fallible (user comparisons)
+    // but mutates nothing, so a panic here is harmless.
+    let nothing_here = self
+      .get(components.iter().map(Borrow::<C>::borrow))
+      .is_none()
+      && self
+        .descendants(components.iter().map(Borrow::<C>::borrow))
+        .next()
+        .is_none();
+    if nothing_here {
+      return 0;
+    }
+    // `unlink_prefix` counts and unlinks the whole subtree at `key`, correcting
+    // `len` atomically with the (infallible) unlink — and never cloning a `V`.
+    match self.root.as_mut() {
+      Some(root) => Node::unlink_prefix(root, components, &mut self.len),
+      None => 0,
+    }
+  }
+
+  /// Removes the value at `key` *and* every strict descendant (node-inclusive) and
+  /// returns their values in ascending key order (the value at `key` itself, if
+  /// any, first). Clones values out before unlinking.
+  pub(crate) fn drain_prefix(&mut self, components: &[C::Owned]) -> Vec<V> {
+    // Phase 1 (read-only, fallible): clone the value at `key` (which sorts before
+    // all descendants) then every strict-descendant value, in ascending key order,
+    // BEFORE unlinking anything. A `V::clone` panic here unwinds with the trie and
+    // `len` completely untouched. The emptiness check also doubles as the
+    // nothing-to-drain guard: an empty result means no copy-on-write.
+    let mut out: Vec<V> = Vec::new();
+    if let Some(v) = self.get(components.iter().map(Borrow::<C>::borrow)) {
+      out.push(v.clone());
+    }
+    out.extend(
+      self
+        .descendants(components.iter().map(Borrow::<C>::borrow))
+        .cloned(),
+    );
+    if out.is_empty() {
+      return out;
+    }
+    // Phase 2: the values are safely captured, so commit the structural change.
+    // `unlink_prefix` corrects `len` atomically with the (infallible) unlink.
+    if let Some(root) = self.root.as_mut() {
+      Node::unlink_prefix(root, components, &mut self.len);
     }
     out
   }
@@ -847,4 +1093,287 @@ where
     .zip(b)
     .take_while(|(x, y)| Borrow::<C>::borrow(*x) == Borrow::<C>::borrow(*y))
     .count()
+}
+
+/// Appends owned copies of `labels` to `dst`, re-owning each component through its
+/// `&C` view (so only `C: ToOwned` is required, never `C::Owned: Clone`).
+fn extend_key<C>(dst: &mut Vec<C::Owned>, labels: &[C::Owned])
+where
+  C: ?Sized + ToOwned,
+{
+  dst.extend(labels.iter().map(|c| Borrow::<C>::borrow(c).to_owned()));
+}
+
+/// Duplicates an owned component slice via the `&C` view, requiring only
+/// `C: ToOwned` (not `C::Owned: Clone`).
+fn dup_key<C>(key: &[C::Owned]) -> Vec<C::Owned>
+where
+  C: ?Sized + ToOwned,
+{
+  let mut out = Vec::with_capacity(key.len());
+  extend_key::<C>(&mut out, key);
+  out
+}
+
+/// Lexicographic comparison of two owned component slices through their `&C`
+/// views, requiring only `C: Ord` (not `C::Owned: Ord`).
+fn cmp_components<C>(a: &[C::Owned], b: &[C::Owned]) -> Ordering
+where
+  C: ?Sized + ToOwned + Ord,
+{
+  a.iter()
+    .map(|c| Borrow::<C>::borrow(c))
+    .cmp(b.iter().map(|c| Borrow::<C>::borrow(c)))
+}
+
+/// A frame in [`RevValueIter`]'s explicit DFS stack: either a subtree still to be
+/// expanded, or a value ready to be yielded once its descendants are exhausted.
+enum RevFrame<'a, P, C, V>
+where
+  C: ?Sized + ToOwned,
+  P: SharedPointerKind,
+{
+  Node(&'a Node<P, C, V>),
+  Value(&'a V),
+}
+
+/// Depth-first iterator over references to every value in a forest of subtrees, in
+/// *reverse* key order (mirror of [`ValueIter`]). A node's own value sorts before
+/// all its descendants, so descending order visits the larger children first and
+/// the node's own value last.
+pub(crate) struct RevValueIter<'a, P, C, V>
+where
+  C: ?Sized + ToOwned,
+  P: SharedPointerKind,
+{
+  stack: Vec<RevFrame<'a, P, C, V>>,
+}
+
+impl<'a, P, C, V> RevValueIter<'a, P, C, V>
+where
+  C: ?Sized + ToOwned,
+  P: SharedPointerKind,
+{
+  #[inline]
+  pub(crate) const fn empty() -> Self {
+    Self { stack: Vec::new() }
+  }
+
+  /// Seeds the stack from a forest of subtree roots given in *ascending* key
+  /// order; iteration then yields them in descending order (the last/largest root
+  /// is processed first).
+  #[inline]
+  fn from_nodes(nodes: Vec<&'a Node<P, C, V>>) -> Self {
+    Self {
+      stack: nodes.into_iter().map(RevFrame::Node).collect(),
+    }
+  }
+}
+
+impl<'a, P, C, V> Iterator for RevValueIter<'a, P, C, V>
+where
+  C: ?Sized + ToOwned,
+  P: SharedPointerKind,
+{
+  type Item = &'a V;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    while let Some(frame) = self.stack.pop() {
+      match frame {
+        RevFrame::Node(node) => {
+          // Push the value first (deepest), so it is yielded only after every
+          // child; push children in ascending order so the largest lands on top
+          // and is visited first (descending key order).
+          if let Some(v) = node.value.as_ref() {
+            self.stack.push(RevFrame::Value(v));
+          }
+          for edge in &node.children {
+            self.stack.push(RevFrame::Node(&edge.child));
+          }
+        }
+        RevFrame::Value(v) => return Some(v),
+      }
+    }
+    None
+  }
+}
+
+/// A frame in [`RangeIter`]'s explicit DFS stack. Each frame carries the
+/// reconstructed key prefix from the root, so a yielded entry's full key is built
+/// without a second traversal.
+enum RangeFrame<'a, P, C, V>
+where
+  C: ?Sized + ToOwned,
+  P: SharedPointerKind,
+{
+  Node {
+    node: &'a Node<P, C, V>,
+    key: Vec<C::Owned>,
+  },
+  Yield {
+    key: Vec<C::Owned>,
+    value: &'a V,
+  },
+}
+
+/// Forward cursor over `(key, value)` entries within a range, in ascending key
+/// order. Borrows the shared node graph (`&V`, no value clones); each yielded key
+/// is reconstructed by concatenating the root-to-node edge labels.
+pub(crate) struct RangeIter<'a, P, C, V>
+where
+  C: ?Sized + ToOwned,
+  P: SharedPointerKind,
+{
+  stack: Vec<RangeFrame<'a, P, C, V>>,
+  upper: Bound<Vec<C::Owned>>,
+  done: bool,
+}
+
+impl<P, C, V> RangeIter<'_, P, C, V>
+where
+  C: ?Sized + ToOwned,
+  P: SharedPointerKind,
+{
+  #[inline]
+  pub(crate) const fn empty() -> Self {
+    Self {
+      stack: Vec::new(),
+      upper: Bound::Unbounded,
+      done: true,
+    }
+  }
+}
+
+impl<'a, P, C, V> Iterator for RangeIter<'a, P, C, V>
+where
+  C: ?Sized + ToOwned + Ord,
+  P: SharedPointerKind,
+{
+  type Item = (Vec<C::Owned>, &'a V);
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.done {
+      return None;
+    }
+    while let Some(frame) = self.stack.pop() {
+      match frame {
+        RangeFrame::Node { node, key } => {
+          // Push children in reverse so the smallest is visited first (ascending),
+          // then the node's own value on top so it precedes its descendants.
+          for edge in node.children.iter().rev() {
+            let mut child_key = dup_key::<C>(&key);
+            extend_key::<C>(&mut child_key, &edge.label);
+            self.stack.push(RangeFrame::Node {
+              node: &edge.child,
+              key: child_key,
+            });
+          }
+          if let Some(value) = node.value.as_ref() {
+            self.stack.push(RangeFrame::Yield { key, value });
+          }
+        }
+        RangeFrame::Yield { key, value } => {
+          // Entries arrive in ascending order, so the first key past the upper
+          // bound ends iteration: nothing remaining can be within range.
+          let within = match &self.upper {
+            Bound::Unbounded => true,
+            Bound::Included(ub) => cmp_components::<C>(&key, ub) != Ordering::Greater,
+            Bound::Excluded(ub) => cmp_components::<C>(&key, ub) == Ordering::Less,
+          };
+          if within {
+            return Some((key, value));
+          }
+          self.done = true;
+          self.stack.clear();
+          return None;
+        }
+      }
+    }
+    self.done = true;
+    None
+  }
+}
+
+/// Seeds `stack` (for ascending iteration) with exactly the entries of `node`'s
+/// subtree whose full key is `>= lower` (`included`) or `> lower` (otherwise),
+/// where `lower == key ++ suffix`. `key` is the already-reconstructed prefix from
+/// the root to `node`.
+///
+/// The frames are pushed so the normal ascending expansion yields them in order:
+/// the matching child's seeded frames sit above (are popped before) the wholly
+/// greater right siblings.
+fn seed_lower<'a, P, C, V>(
+  stack: &mut Vec<RangeFrame<'a, P, C, V>>,
+  node: &'a Node<P, C, V>,
+  key: Vec<C::Owned>,
+  suffix: &[C::Owned],
+  included: bool,
+) where
+  C: ?Sized + ToOwned + Ord,
+  P: SharedPointerKind,
+{
+  let Some(first) = suffix.first() else {
+    // `lower` is exactly this node's key. Its descendants all outrank it, so they
+    // are included wholesale; the node's own value is included only when the bound
+    // is inclusive.
+    if included {
+      stack.push(RangeFrame::Node { node, key });
+    } else {
+      for edge in node.children.iter().rev() {
+        let mut child_key = dup_key::<C>(&key);
+        extend_key::<C>(&mut child_key, &edge.label);
+        stack.push(RangeFrame::Node {
+          node: &edge.child,
+          key: child_key,
+        });
+      }
+    }
+    return;
+  };
+
+  // `lower` extends strictly below this node, so the node's own value (a proper
+  // prefix of `lower`) is below the bound and excluded. Children fall into three
+  // groups by their first component relative to `first`.
+  let idx = node.child_index(first.borrow());
+  let gt_start = match idx {
+    Ok(i) => i + 1,
+    Err(i) => i,
+  };
+  // Children whose first component exceeds `first` are wholly above the bound, and
+  // sort after the matching child's subtree — push them first (deepest), reversed
+  // so the smallest of them is popped first.
+  for edge in node.children[gt_start..].iter().rev() {
+    let mut child_key = dup_key::<C>(&key);
+    extend_key::<C>(&mut child_key, &edge.label);
+    stack.push(RangeFrame::Node {
+      node: &edge.child,
+      key: child_key,
+    });
+  }
+  // Children whose first component is below `first` are wholly below the bound and
+  // excluded. The matching child (if any) is seeded last, so its frames sit on top.
+  if let Ok(i) = idx {
+    let edge = &node.children[i];
+    let shared = common_len::<C>(&edge.label, suffix);
+    let mut child_key = dup_key::<C>(&key);
+    extend_key::<C>(&mut child_key, &edge.label);
+    if shared == edge.label.len() {
+      // Whole edge matched: continue the descent with the remaining suffix.
+      seed_lower(stack, &edge.child, child_key, &suffix[shared..], included);
+    } else if shared == suffix.len() {
+      // `lower` runs out mid-edge: it is a proper prefix of every key in this
+      // subtree, so all of them strictly exceed it — include the whole subtree.
+      stack.push(RangeFrame::Node {
+        node: &edge.child,
+        key: child_key,
+      });
+    } else if Borrow::<C>::borrow(&suffix[shared]) < Borrow::<C>::borrow(&edge.label[shared]) {
+      // The edge diverges above `lower`: the whole subtree exceeds it — include it.
+      stack.push(RangeFrame::Node {
+        node: &edge.child,
+        key: child_key,
+      });
+    }
+    // Otherwise the edge diverges below `lower`: the whole subtree is excluded.
+  }
 }

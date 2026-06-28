@@ -318,6 +318,61 @@ where
   {
     self.working.has_ancestor(key)
   }
+
+  /// Returns the smallest key (component lexicographic order) and its value in the
+  /// working copy.
+  #[inline]
+  pub fn minimum(&self) -> Option<(std::vec::Vec<C::Owned>, &V)> {
+    self.working.minimum()
+  }
+
+  /// Returns the largest key (component lexicographic order) and its value in the
+  /// working copy.
+  #[inline]
+  pub fn maximum(&self) -> Option<(std::vec::Vec<C::Owned>, &V)> {
+    self.working.maximum()
+  }
+
+  /// Iterates references to every value in the working copy, in reverse key order.
+  #[inline]
+  #[must_use]
+  pub fn values_rev(&self) -> super::RevValues<'_, C, V> {
+    self.working.values_rev()
+  }
+
+  /// Iterates references to `key`'s strict descendants in the working copy, in
+  /// reverse key order.
+  #[inline]
+  #[must_use]
+  pub fn descendants_rev<K>(&self, key: &K) -> super::RevDescendants<'_, C, V>
+  where
+    K: crate::RadixKey<Component = C> + ?Sized,
+  {
+    self.working.descendants_rev(key)
+  }
+
+  /// Iterates `(key, value)` for every working-copy entry within `range`, in
+  /// ascending key order.
+  #[inline]
+  #[must_use]
+  pub fn range<K, R>(&self, range: R) -> super::Range<'_, C, V>
+  where
+    K: crate::RadixKey<Component = C> + ?Sized,
+    R: core::ops::RangeBounds<K>,
+  {
+    self.working.range(range)
+  }
+
+  /// Returns a forward cursor over the working copy positioned at the first entry
+  /// whose key is `>= key`, then ascending.
+  #[inline]
+  #[must_use]
+  pub fn seek_lower_bound<K>(&self, key: &K) -> super::Range<'_, C, V>
+  where
+    K: crate::RadixKey<Component = C> + ?Sized,
+  {
+    self.working.seek_lower_bound(key)
+  }
 }
 
 impl<C, V> Txn<'_, C, V>
@@ -362,6 +417,26 @@ where
     K: crate::RadixKey<Component = C> + ?Sized,
   {
     self.working.drain_descendants(key)
+  }
+
+  /// Removes the value at `key` and every strict descendant (node-inclusive) from
+  /// the working copy, returning the count.
+  #[inline]
+  pub fn delete_prefix<K>(&mut self, key: &K) -> usize
+  where
+    K: crate::RadixKey<Component = C> + ?Sized,
+  {
+    self.working.delete_prefix(key)
+  }
+
+  /// Removes the value at `key` and every strict descendant (node-inclusive) from
+  /// the working copy, returning their values in ascending key order.
+  #[inline]
+  pub fn drain_prefix<K>(&mut self, key: &K) -> std::vec::Vec<V>
+  where
+    K: crate::RadixKey<Component = C> + ?Sized,
+  {
+    self.working.drain_prefix(key)
   }
 }
 
