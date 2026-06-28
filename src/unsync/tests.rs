@@ -651,8 +651,10 @@ fn merge_moves_labels_and_returns_value() {
   t.insert(&key(&[1, 2, 3]), 20);
   assert_eq!(t.len(), 2);
 
-  // Arm past the 2 key-materialization clones: the next clone would be the merge's.
-  KEY_FUSE.with(|c| c.set(Some(2)));
+  // `remove` is iterator-native: it materializes no key (both the existence pass
+  // and the unlink pass walk the key by reference). Arm on the very first clone —
+  // which would be the merge's — to prove the merge clones nothing.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| t.remove(key(&[1, 2]).as_slice())));
   KEY_FUSE.with(|c| c.set(None));
 
@@ -783,8 +785,9 @@ fn delete_prefix_may_clone_a_retained_ancestor_value() {
   let snap = t.clone(); // share the path
   assert_eq!(t.len(), 2);
 
-  // Building the 2-element key clones 2 KeyBombs (KEY_FUSE disarmed). Arm the VALUE
-  // fuse on the first value clone: the COW copy of the retained ancestor `[1]`.
+  // No key is materialized (delete_prefix is iterator-native), so the only value
+  // clone is the COW copy of the retained ancestor `[1]` on the path to the prefix.
+  // Arm the VALUE fuse on that first value clone.
   VAL_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| {
     t.delete_prefix(key(&[1, 2]).as_slice())
@@ -818,8 +821,10 @@ fn remove_descendants_merge_moves_labels_keeps_len() {
   t.insert(&key(&[1, 2, 4]), 4);
   assert_eq!(t.len(), 4);
 
-  // Arm past the 3 key-materialization clones: the next clone would be the merge's.
-  KEY_FUSE.with(|c| c.set(Some(3)));
+  // `remove_descendants` is iterator-native: it materializes no key. Arm on the
+  // very first clone — which would be the merge's — to prove the merge clones
+  // nothing.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| {
     t.remove_descendants(key(&[1, 2, 3]).as_slice())
   }));
@@ -851,8 +856,10 @@ fn drain_descendants_merge_moves_labels_returns_values() {
   t.insert(&key(&[1, 2, 4]), 4);
   assert_eq!(t.len(), 4);
 
-  // Arm past the 3 key-materialization clones: the next clone would be the merge's.
-  KEY_FUSE.with(|c| c.set(Some(3)));
+  // `drain_descendants` is iterator-native: it materializes no key (phase 1 clones
+  // only the `u32` values). Arm on the very first clone — which would be the
+  // merge's — to prove the post-unlink merge clones nothing.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| {
     t.drain_descendants(key(&[1, 2, 3]).as_slice())
   }));
@@ -947,10 +954,10 @@ fn remove_panic_in_make_mut_before_take_keeps_len() {
   let snap = t.clone();
   assert_eq!(t.len(), 2);
 
-  // Fire on the very first clone — inside `make_mut`, before any value is taken.
-  // Arm past the 3 key-materialization clones so the fuse fires inside make_mut
-  // (the copy-on-write of the shared path), before the value is taken.
-  KEY_FUSE.with(|c| c.set(Some(3)));
+  // `remove` materializes no key, and the existence pass only reads, so the FIRST
+  // `KeyBomb` clone is the copy-on-write `make_mut` of the shared path (cloning the
+  // root edge's label). Arm on it — it fires before any value is taken.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| t.remove(key(&[1, 2, 3]).as_slice())));
   KEY_FUSE.with(|c| c.set(None));
   assert!(r.is_err(), "the make_mut clone must have panicked");
@@ -971,9 +978,10 @@ fn remove_descendants_panic_in_make_mut_before_unlink_keeps_len() {
   let snap = t.clone();
   assert_eq!(t.len(), 3);
 
-  // Arm past the 1 key-materialization clone so the fuse fires inside make_mut
-  // (the copy-on-write of the shared path), before anything is unlinked.
-  KEY_FUSE.with(|c| c.set(Some(1)));
+  // `remove_descendants` materializes no key, and the existence pass only reads, so
+  // the FIRST `KeyBomb` clone is the copy-on-write `make_mut` of the shared path.
+  // Arm on it — it fires before anything is unlinked.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| {
     t.remove_descendants(key(&[1]).as_slice())
   }));
@@ -998,11 +1006,10 @@ fn drain_descendants_panic_in_make_mut_before_unlink_keeps_len() {
   let snap = t.clone();
   assert_eq!(t.len(), 3);
 
-  // The values clone first (Phase 1, fine for `u32`); the panic is in Phase 2's
-  // `make_mut`, before anything is unlinked.
-  // Arm past the 1 key-materialization clone so the fuse fires inside make_mut
-  // (the copy-on-write of the shared path), before anything is unlinked.
-  KEY_FUSE.with(|c| c.set(Some(1)));
+  // Phase 1 clones only the `u32` values (no key is materialized); the panic is in
+  // Phase 2's `make_mut` (the copy-on-write of the shared path), before anything is
+  // unlinked. The FIRST `KeyBomb` clone is that make_mut, so arm on it.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| {
     t.drain_descendants(key(&[1]).as_slice())
   }));
@@ -1489,8 +1496,10 @@ fn delete_prefix_panic_in_make_mut_before_unlink_keeps_len() {
   let snap = t.clone();
   assert_eq!(t.len(), 3);
 
-  // Arm past the 1 key-materialization clone so the fuse fires inside make_mut.
-  KEY_FUSE.with(|c| c.set(Some(1)));
+  // `delete_prefix` materializes no key, and the existence pass only reads, so the
+  // FIRST `KeyBomb` clone is the copy-on-write `make_mut` of the shared path. Arm on
+  // it — it fires before anything is unlinked.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| t.delete_prefix(key(&[1]).as_slice())));
   KEY_FUSE.with(|c| c.set(None));
   assert!(r.is_err(), "the make_mut clone must have panicked");
@@ -1512,9 +1521,10 @@ fn drain_prefix_panic_in_make_mut_before_unlink_keeps_len() {
   let snap = t.clone();
   assert_eq!(t.len(), 3);
 
-  // The values clone first (Phase 1, fine for `u32`); the panic is in Phase 2's
-  // make_mut, before anything is unlinked.
-  KEY_FUSE.with(|c| c.set(Some(1)));
+  // Phase 1 clones only the `u32` values (no key is materialized); the panic is in
+  // Phase 2's make_mut (the copy-on-write of the shared path), before anything is
+  // unlinked. The FIRST `KeyBomb` clone is that make_mut, so arm on it.
+  KEY_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| t.drain_prefix(key(&[1]).as_slice())));
   KEY_FUSE.with(|c| c.set(None));
   assert!(r.is_err(), "the make_mut clone must have panicked");
