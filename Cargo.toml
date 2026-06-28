@@ -13,11 +13,6 @@ keywords = ["radix", "trie", "persistent", "immutable", "copy-on-write"]
 
 [features]
 default = ["std"]
-# `std` and `alloc` are INDEPENDENT cfg markers: `std` does not imply `alloc`.
-# `std` links the real standard library; `alloc` (without `std`) selects the
-# `alloc`-as-`std` alias for a no_std + heap build. `archery` always provides the
-# heap (`Rc`/`Arc`) and has no std/alloc feature of its own, so neither marker
-# layers any dependency feature.
 std = []
 alloc = []
 

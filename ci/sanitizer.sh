@@ -1,17 +1,22 @@
 #!/bin/bash
-
 set -ex
 
 export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
 
-# Run address sanitizer with cargo-hack
+TARGET="x86_64-unknown-linux-gnu"
+
+# Run address sanitizer
 RUSTFLAGS="-Z sanitizer=address" \
-cargo test --lib
+cargo test --tests --target "$TARGET" --all-features
 
-# Run leak sanitizer with cargo-hack
+# Run leak sanitizer
 RUSTFLAGS="-Z sanitizer=leak" \
-cargo test --lib
+cargo test --tests --target "$TARGET" --all-features
 
-# Run thread sanitizer with cargo-hack
+# Run memory sanitizer (requires -Zbuild-std for instrumented std)
+RUSTFLAGS="-Z sanitizer=memory" \
+cargo -Zbuild-std test --tests --target "$TARGET" --all-features
+
+# Run thread sanitizer (requires -Zbuild-std for instrumented std)
 RUSTFLAGS="-Z sanitizer=thread" \
-cargo -Zbuild-std test --lib
+cargo -Zbuild-std test --tests --target "$TARGET" --all-features
