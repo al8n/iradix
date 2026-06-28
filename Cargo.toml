@@ -20,6 +20,7 @@ alloc = []
 archery = { version = "1", default-features = false }
 
 [dev-dependencies]
+arc-swap = "1"
 proptest = "1"
 
 [package.metadata.docs.rs]

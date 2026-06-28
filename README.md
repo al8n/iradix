@@ -42,9 +42,13 @@ dependency on any of it: it is a plain, reusable container.
 - **Persistent + structurally shared.** A shared internal `node` core mutates in
   place at refcount 1 and copies only when a node is shared, so old snapshots are
   never disturbed. The reference-counting pointer is an internal detail.
-- **Sync / unsync split.** [`unsync::Radix`] uses `Rc` (`!Send`, no atomics);
-  [`sync::Radix`] uses `Arc` (`Send + Sync`, auto-derived). Both expose the same
-  direct `&mut self` copy-on-write mutation API.
+- **Sync / unsync split.** [`unsync::Radix`] uses `Rc` (`!Send`, no atomics) and
+  mutates in place via a direct `&mut self` copy-on-write handle.
+  [`sync::Radix`] uses `Arc` (`Send + Sync`, auto-derived) and is an **immutable
+  persistent tree** (go-immutable-radix's `Tree`): mutate it either with a `Txn`
+  (an owned working copy — open with `txn()`, edit, then `commit()`) or with one-op
+  `&self` methods that each return the next tree. Both faces share one copy-on-write
+  core, so a `.clone()` and a snapshot are `O(1)` and structurally shared.
 - **Path-compressed, ordered.** Edges live in the parent's `Vec`, sorted by their
   first component and located by binary search — no hashing.
 - **Prefix queries.** Inclusive [`get_ancestor`] (longest covered prefix),
@@ -56,9 +60,11 @@ dependency on any of it: it is a plain, reusable container.
   `range` (any `RangeBounds`) / `seek_lower_bound` cursors that yield reconstructed
   `(key, value)` pairs.
 - **Bring-your-own concurrency.** `iradix` ships no built-in concurrent holder.
-  [`sync::Radix`] is an immutable, `O(1)`-clone snapshot (like go-immutable-radix's
-  `Tree`): clone it, mutate the clone, and publish it yourself — e.g. wrap it in
-  `arc_swap::ArcSwap<sync::Radix<…>>` or a `Mutex` for a shared atomic holder.
+  [`sync::Radix`] is an immutable, `O(1)`-clone tree, so you publish new versions
+  yourself — the lock-free pattern wraps it in `arc_swap::ArcSwap<sync::Radix<…>>`:
+  readers `load()` a wait-free snapshot, and a writer opens a `txn()`, `commit()`s
+  the next tree, and publishes it with a compare-and-swap retry loop (so a write is
+  never silently lost). A worked example ships in [`examples/sync.rs`](examples/sync.rs).
 - **`no_std` + `alloc`.** `std` and `alloc` are independent features.
 
 ## Installation
@@ -82,7 +88,7 @@ Runnable, self-contained examples live in [`examples/`](examples/):
 | example | what it shows |
 |---|---|
 | [`unsync`](examples/unsync.rs) | `unsync::Radix` — exact lookup; longest-covered-prefix queries (`get_ancestor` / `strict_ancestor`); ordered queries (`minimum` / `maximum` / `range` / `seek_lower_bound`); node-inclusive prefix removal; and `O(1)` snapshot isolation. |
-| [`sync`](examples/sync.rs) | `sync::Radix` — lock-free concurrent reads (`Send + Sync`); snapshot isolation across a write; and the clone-mutate-publish pattern with a shared `Arc<Mutex<…>>` holder. |
+| [`sync`](examples/sync.rs) | `sync::Radix` — lock-free concurrent reads (`Send + Sync`); the immutable one-op `insert` and a batching `Txn` → `commit`; and the lock-free shared-holder pattern with `arc_swap::ArcSwap<sync::Radix<…>>` (load to read; txn → commit → CAS to publish). |
 
 Run them with:
 
