@@ -5,7 +5,7 @@
 //! the right choice when no snapshot ever crosses a thread boundary. For a
 //! cross-thread snapshot, use [`crate::sync`].
 
-use std::{borrow::ToOwned, vec::Vec};
+use std::vec::Vec;
 
 use core::{
   borrow::Borrow,
@@ -35,21 +35,16 @@ use crate::{
 ///
 /// # Bounds
 ///
-/// The struct itself requires only the structural `C: ?Sized + ToOwned`. Reads
-/// add `C: Ord`; persistent mutators add `C: Ord, C::Owned: Clone, V: Clone`.
-/// Reads are `V`-bound-free and return `&V`.
-pub struct Radix<C, V>
-where
-  C: ?Sized + ToOwned,
-{
+/// The struct itself puts no bound on `C`. Reads add `C: Ord`; the ordered reads
+/// that rebuild a key (`minimum` / `maximum` / `range` / `seek_lower_bound`) also
+/// add `C: Clone`; persistent mutators add `C: Ord + Clone, V: Clone`. Reads are
+/// `V`-bound-free and return `&V`.
+pub struct Radix<C, V> {
   inner: Root<RcK, C, V>,
 }
 
 // O(1) clone — no `V: Clone` (the pointer is bumped, values are not touched).
-impl<C, V> Clone for Radix<C, V>
-where
-  C: ?Sized + ToOwned,
-{
+impl<C, V> Clone for Radix<C, V> {
   #[inline]
   fn clone(&self) -> Self {
     Self {
@@ -58,20 +53,14 @@ where
   }
 }
 
-impl<C, V> Default for Radix<C, V>
-where
-  C: ?Sized + ToOwned,
-{
+impl<C, V> Default for Radix<C, V> {
   #[inline]
   fn default() -> Self {
     Self::new()
   }
 }
 
-impl<C, V> Radix<C, V>
-where
-  C: ?Sized + ToOwned,
-{
+impl<C, V> Radix<C, V> {
   /// Creates an empty trie. `const`: no allocation happens until the first
   /// insert.
   #[inline]
@@ -102,7 +91,7 @@ where
 
 impl<C, V> Radix<C, V>
 where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord,
 {
   /// Returns a reference to the value stored at exactly `key`, if any.
   ///
@@ -188,14 +177,20 @@ where
   /// Returns the smallest key (component lexicographic order) and its value, or
   /// `None` if the trie is empty.
   #[inline]
-  pub fn minimum(&self) -> Option<(Vec<C::Owned>, &V)> {
+  pub fn minimum(&self) -> Option<(Vec<C>, &V)>
+  where
+    C: Clone,
+  {
     self.inner.minimum()
   }
 
   /// Returns the largest key (component lexicographic order) and its value, or
   /// `None` if the trie is empty.
   #[inline]
-  pub fn maximum(&self) -> Option<(Vec<C::Owned>, &V)> {
+  pub fn maximum(&self) -> Option<(Vec<C>, &V)>
+  where
+    C: Clone,
+  {
     self.inner.maximum()
   }
 
@@ -233,6 +228,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
     R: RangeBounds<K>,
+    C: Clone,
   {
     Range {
       inner: self.inner.range(
@@ -250,20 +246,20 @@ where
   pub fn seek_lower_bound<K>(&self, key: &K) -> Range<'_, C, V>
   where
     K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
   {
-    let lower: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    let lower: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
     Range {
       inner: self.inner.range(Bound::Included(lower), Bound::Unbounded),
     }
   }
 }
 
-// ----- mutators (C: Ord, C::Owned: Clone, V: Clone) -----------------------
+// ----- mutators (C: Ord + Clone, V: Clone) --------------------------------
 
 impl<C, V> Radix<C, V>
 where
-  C: ?Sized + ToOwned + Ord,
-  C::Owned: Clone,
+  C: Ord + Clone,
   V: Clone,
 {
   /// Inserts `value` at `key`, returning the previous value if the key was set.
@@ -271,7 +267,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
     self.inner.insert(&components, value)
   }
 
@@ -280,7 +276,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
     self.inner.remove(&components)
   }
 
@@ -290,7 +286,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
     self.inner.remove_descendants(&components)
   }
 
@@ -300,7 +296,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
     self.inner.drain_descendants(&components)
   }
 
@@ -313,7 +309,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
     self.inner.delete_prefix(&components)
   }
 
@@ -324,7 +320,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
     self.inner.drain_prefix(&components)
   }
 }
@@ -334,17 +330,11 @@ where
 /// Iterator over references to every value in a [`Radix`], in key order.
 ///
 /// Created by [`Radix::values`].
-pub struct Values<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+pub struct Values<'a, C, V> {
   inner: ValueIter<'a, RcK, C, V>,
 }
 
-impl<'a, C, V> Iterator for Values<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+impl<'a, C, V> Iterator for Values<'a, C, V> {
   type Item = &'a V;
 
   #[inline]
@@ -372,17 +362,11 @@ impl<'a, V> Iterator for Ancestors<'a, V> {
 /// Iterator over references to the values of `key`'s strict descendants.
 ///
 /// Created by [`Radix::descendants`].
-pub struct Descendants<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+pub struct Descendants<'a, C, V> {
   inner: ValueIter<'a, RcK, C, V>,
 }
 
-impl<'a, C, V> Iterator for Descendants<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+impl<'a, C, V> Iterator for Descendants<'a, C, V> {
   type Item = &'a V;
 
   #[inline]
@@ -394,17 +378,11 @@ where
 /// Iterator over references to every value in a [`Radix`], in reverse key order.
 ///
 /// Created by [`Radix::values_rev`].
-pub struct RevValues<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+pub struct RevValues<'a, C, V> {
   inner: RevValueIter<'a, RcK, C, V>,
 }
 
-impl<'a, C, V> Iterator for RevValues<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+impl<'a, C, V> Iterator for RevValues<'a, C, V> {
   type Item = &'a V;
 
   #[inline]
@@ -416,17 +394,11 @@ where
 /// Iterator over references to `key`'s strict descendants, in reverse key order.
 ///
 /// Created by [`Radix::descendants_rev`].
-pub struct RevDescendants<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+pub struct RevDescendants<'a, C, V> {
   inner: RevValueIter<'a, RcK, C, V>,
 }
 
-impl<'a, C, V> Iterator for RevDescendants<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+impl<'a, C, V> Iterator for RevDescendants<'a, C, V> {
   type Item = &'a V;
 
   #[inline]
@@ -439,18 +411,15 @@ where
 ///
 /// Each item's key is reconstructed as a `Vec` of its components. Created by
 /// [`Radix::range`] and [`Radix::seek_lower_bound`].
-pub struct Range<'a, C, V>
-where
-  C: ?Sized + ToOwned,
-{
+pub struct Range<'a, C, V> {
   inner: RangeIter<'a, RcK, C, V>,
 }
 
 impl<'a, C, V> Iterator for Range<'a, C, V>
 where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord + Clone,
 {
-  type Item = (Vec<C::Owned>, &'a V);
+  type Item = (Vec<C>, &'a V);
 
   #[inline]
   fn next(&mut self) -> Option<Self::Item> {
@@ -460,14 +429,14 @@ where
 
 /// Re-owns a `RangeBounds` endpoint into a `Bound` of materialized components for
 /// the internal range cursor.
-fn materialize_bound<C, K>(bound: Bound<&K>) -> Bound<Vec<C::Owned>>
+fn materialize_bound<C, K>(bound: Bound<&K>) -> Bound<Vec<C>>
 where
-  C: ?Sized + ToOwned,
+  C: Clone,
   K: RadixKey<Component = C> + ?Sized,
 {
   match bound {
-    Bound::Included(k) => Bound::Included(k.components().map(|c| c.borrow().to_owned()).collect()),
-    Bound::Excluded(k) => Bound::Excluded(k.components().map(|c| c.borrow().to_owned()).collect()),
+    Bound::Included(k) => Bound::Included(k.components().map(|c| c.borrow().clone()).collect()),
+    Bound::Excluded(k) => Bound::Excluded(k.components().map(|c| c.borrow().clone()).collect()),
     Bound::Unbounded => Bound::Unbounded,
   }
 }
@@ -475,7 +444,7 @@ where
 #[cfg(test)]
 impl<C, V> Radix<C, V>
 where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord,
 {
   /// Test-only: number of direct edges from the root.
   pub(crate) fn root_child_count(&self) -> usize {

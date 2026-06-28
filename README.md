@@ -23,10 +23,14 @@ dependency on any of it: it is a plain, reusable container.
 
 ## Highlights
 
-- **Bring-your-own-key.** [`RadixKey`] decomposes a key into components; lookups
-  are zero-copy. Foundational impls cover `[C]`, `Vec<C>`, and `str` (which is
-  `char`-addressed). A `str` key and a `Vec<char>` key over the same characters
-  address the same path.
+- **Bring-your-own-key.** [`RadixKey`] decomposes a key into components; its
+  `Component` is the owned, `Sized` element the trie stores (`[u8]` → `u8`, `str` →
+  `char`; foundational impls for `[C]`, `Vec<C>`, and `str`). Lookups stay
+  zero-alloc — `components()` yields anything `Borrow<Component>`, so a slice walk
+  borrows `&C` and copies nothing; the component bounds are just `C: Ord` (reads)
+  and `C: Ord + Clone` (mutators). A `str` key and a `Vec<char>` key over the same
+  characters address the same path. An *unsized* component (e.g. `Component = str`)
+  is not supported — use an owned component (`String`, or a cheap-clone newtype).
 - **Persistent + structurally shared.** A shared internal `node` core mutates in
   place at refcount 1 and copies only when a node is shared, so old snapshots are
   never disturbed. The reference-counting pointer is an internal detail.

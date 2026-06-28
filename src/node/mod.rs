@@ -17,7 +17,7 @@
 //! unwinding) and allocation failure (it aborts via the alloc-error handler, not an
 //! unwind), so neither can corrupt the trie by returning mid-operation.
 
-use std::{borrow::ToOwned, boxed::Box, vec, vec::Vec};
+use std::{boxed::Box, vec, vec::Vec};
 
 use core::{borrow::Borrow, cmp::Ordering, ops::Bound};
 
@@ -30,10 +30,9 @@ use archery::{SharedPointer, SharedPointerKind};
 /// reparents the existing (shared) child.
 pub(crate) struct Edge<P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
-  pub(crate) label: Box<[C::Owned]>,
+  pub(crate) label: Box<[C]>,
   pub(crate) child: SharedPointer<Node<P, C, V>, P>,
 }
 
@@ -42,9 +41,7 @@ where
 // shared between versions (refcount > 1).
 impl<P, C, V> Clone for Edge<P, C, V>
 where
-  C: ?Sized + ToOwned,
-  C::Owned: Clone,
-  V: Clone,
+  C: Clone,
   P: SharedPointerKind,
 {
   #[inline]
@@ -60,7 +57,6 @@ where
 /// sorted by their edge label's first component, located by binary search.
 pub(crate) struct Node<P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   pub(crate) value: Option<V>,
@@ -69,8 +65,7 @@ where
 
 impl<P, C, V> Clone for Node<P, C, V>
 where
-  C: ?Sized + ToOwned,
-  C::Owned: Clone,
+  C: Clone,
   V: Clone,
   P: SharedPointerKind,
 {
@@ -85,7 +80,6 @@ where
 
 impl<P, C, V> Node<P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   #[inline]
@@ -124,7 +118,7 @@ where
 
 impl<P, C, V> Node<P, C, V>
 where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord,
   P: SharedPointerKind,
 {
   /// Binary-searches children for the edge whose label begins with `first`.
@@ -277,9 +271,12 @@ where
   /// its value. A node's own value precedes all its descendants, so the minimum is
   /// found by taking each node's value if present, else descending into its
   /// smallest (first) child.
-  fn minimum(&self) -> Option<(Vec<C::Owned>, &V)> {
+  fn minimum(&self) -> Option<(Vec<C>, &V)>
+  where
+    C: Clone,
+  {
     let mut node = self;
-    let mut key: Vec<C::Owned> = Vec::new();
+    let mut key: Vec<C> = Vec::new();
     loop {
       if let Some(v) = node.value.as_ref() {
         return Some((key, v));
@@ -294,9 +291,12 @@ where
   /// its value. Every descendant outranks a node's own value, so the maximum lives
   /// in the largest (last) child whenever one exists, and is a node's own value
   /// only at a childless leaf.
-  fn maximum(&self) -> Option<(Vec<C::Owned>, &V)> {
+  fn maximum(&self) -> Option<(Vec<C>, &V)>
+  where
+    C: Clone,
+  {
     let mut node = self;
-    let mut key: Vec<C::Owned> = Vec::new();
+    let mut key: Vec<C> = Vec::new();
     loop {
       match node.children.last() {
         Some(edge) => {
@@ -329,11 +329,10 @@ where
   /// `[lower, upper]` (each end honoring its [`Bound`] kind). The lower bound is
   /// resolved eagerly here (descending the trie and seeding only the subtrees at
   /// or past it); the upper bound is checked lazily as the cursor advances.
-  fn range_iter(
-    &self,
-    lower: Bound<Vec<C::Owned>>,
-    upper: Bound<Vec<C::Owned>>,
-  ) -> RangeIter<'_, P, C, V> {
+  fn range_iter(&self, lower: Bound<Vec<C>>, upper: Bound<Vec<C>>) -> RangeIter<'_, P, C, V>
+  where
+    C: Clone,
+  {
     let mut stack = Vec::new();
     match &lower {
       Bound::Unbounded => stack.push(RangeFrame::Node {
@@ -353,8 +352,7 @@ where
 
 impl<P, C, V> Node<P, C, V>
 where
-  C: ?Sized + ToOwned + Ord,
-  C::Owned: Clone,
+  C: Ord + Clone,
   V: Clone,
   P: SharedPointerKind,
 {
@@ -362,7 +360,7 @@ where
   /// write. Returns the previous value if the exact key was already set.
   pub(crate) fn insert(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C::Owned],
+    key: &[C],
     value: V,
   ) -> Option<V> {
     let node = SharedPointer::make_mut(node_ptr);
@@ -399,14 +397,14 @@ where
     // Split edge `i` at `shared`. Build the COMPLETE replacement `mid` subtree —
     // its label clones, the reused old child (an O(1) pointer clone), the new
     // leaf, and the sorted child order — while edge `i` is still installed. Every
-    // fallible step (label `C::Owned::clone`, leaf allocation, the user `Ord` that
+    // fallible step (label `C::clone`, leaf allocation, the user `Ord` that
     // orders the two children) therefore runs before anything is detached, so an
     // unwind leaves the trie and `len` untouched. Only the final single move
     // splices `mid` in, dropping the old edge (whose child was already cloned, so
     // no subtree is lost).
     let (head, tail) = node.children[i].label.split_at(shared);
-    let head: Box<[C::Owned]> = head.to_vec().into_boxed_slice();
-    let tail: Box<[C::Owned]> = tail.to_vec().into_boxed_slice();
+    let head: Box<[C]> = head.to_vec().into_boxed_slice();
+    let tail: Box<[C]> = tail.to_vec().into_boxed_slice();
     let old_child_edge = Edge {
       label: tail,
       child: node.children[i].child.clone(),
@@ -453,7 +451,7 @@ where
   /// write and re-compressing. Returns the removed value if present.
   pub(crate) fn remove(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C::Owned],
+    key: &[C],
     len: &mut usize,
   ) -> Option<V> {
     let node = SharedPointer::make_mut(node_ptr);
@@ -496,7 +494,7 @@ where
   /// (see [`crate::unsync::Radix::drain_descendants`]).
   pub(crate) fn unlink_descendants(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C::Owned],
+    key: &[C],
     len: &mut usize,
   ) -> usize {
     let node = SharedPointer::make_mut(node_ptr);
@@ -552,7 +550,7 @@ where
   /// [`unlink_descendants`]: Node::unlink_descendants
   pub(crate) fn unlink_prefix(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C::Owned],
+    key: &[C],
     len: &mut usize,
   ) -> usize {
     let node = SharedPointer::make_mut(node_ptr);
@@ -609,7 +607,6 @@ where
 /// algorithm exists in exactly one place.
 pub(crate) struct Root<P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   // `None` is the empty trie; the root node is allocated lazily on first insert
@@ -621,7 +618,6 @@ where
 // O(1) clone — no `V: Clone` (the pointer is bumped, values are not touched).
 impl<P, C, V> Clone for Root<P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   #[inline]
@@ -635,7 +631,6 @@ where
 
 impl<P, C, V> Root<P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   /// Creates an empty trie. `const`: no allocation until the first insert.
@@ -666,7 +661,7 @@ where
 
 impl<P, C, V> Root<P, C, V>
 where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord,
   P: SharedPointerKind,
 {
   /// Returns a reference to the value stored at exactly `key`, if any.
@@ -727,13 +722,19 @@ where
 
   /// Returns the smallest key (component lexicographic order) and its value.
   #[inline]
-  pub(crate) fn minimum(&self) -> Option<(Vec<C::Owned>, &V)> {
+  pub(crate) fn minimum(&self) -> Option<(Vec<C>, &V)>
+  where
+    C: Clone,
+  {
     self.root.as_ref()?.minimum()
   }
 
   /// Returns the largest key (component lexicographic order) and its value.
   #[inline]
-  pub(crate) fn maximum(&self) -> Option<(Vec<C::Owned>, &V)> {
+  pub(crate) fn maximum(&self) -> Option<(Vec<C>, &V)>
+  where
+    C: Clone,
+  {
     self.root.as_ref()?.maximum()
   }
 
@@ -763,11 +764,10 @@ where
   /// Iterates `(key, value)` for every entry whose key lies within
   /// `[lower, upper]`, in ascending key order.
   #[inline]
-  pub(crate) fn range(
-    &self,
-    lower: Bound<Vec<C::Owned>>,
-    upper: Bound<Vec<C::Owned>>,
-  ) -> RangeIter<'_, P, C, V> {
+  pub(crate) fn range(&self, lower: Bound<Vec<C>>, upper: Bound<Vec<C>>) -> RangeIter<'_, P, C, V>
+  where
+    C: Clone,
+  {
     match self.root.as_ref() {
       Some(root) => root.range_iter(lower, upper),
       None => RangeIter::empty(),
@@ -777,13 +777,12 @@ where
 
 impl<P, C, V> Root<P, C, V>
 where
-  C: ?Sized + ToOwned + Ord,
-  C::Owned: Clone,
+  C: Ord + Clone,
   V: Clone,
   P: SharedPointerKind,
 {
   /// Inserts `value` at `key`, returning the previous value if the key was set.
-  pub(crate) fn insert(&mut self, components: &[C::Owned], value: V) -> Option<V> {
+  pub(crate) fn insert(&mut self, components: &[C], value: V) -> Option<V> {
     let root = self
       .root
       .get_or_insert_with(|| SharedPointer::new(Node::new()));
@@ -795,7 +794,7 @@ where
   }
 
   /// Removes and returns the value at exactly `key`, if any.
-  pub(crate) fn remove(&mut self, components: &[C::Owned]) -> Option<V> {
+  pub(crate) fn remove(&mut self, components: &[C]) -> Option<V> {
     // A read-only existence check first: a remove of an absent key must not
     // copy-on-write (and so must not disturb structural sharing). When the key
     // is present, every node on its root-to-value path genuinely changes, so the
@@ -810,7 +809,7 @@ where
 
   /// Removes every *strict* descendant of `key` (the value at `key`, if any, is
   /// kept), returning the number of values removed. Never clones a `V`.
-  pub(crate) fn remove_descendants(&mut self, components: &[C::Owned]) -> usize {
+  pub(crate) fn remove_descendants(&mut self, components: &[C]) -> usize {
     // Read-only existence check: nothing to remove means no copy-on-write (so
     // structural sharing is preserved) and no `len` change. This traversal is
     // fallible (user comparisons) but mutates nothing, so a panic is harmless.
@@ -831,7 +830,7 @@ where
 
   /// Removes every *strict* descendant of `key` and returns their values (the
   /// value at `key`, if any, is kept). Clones values out before unlinking.
-  pub(crate) fn drain_descendants(&mut self, components: &[C::Owned]) -> Vec<V> {
+  pub(crate) fn drain_descendants(&mut self, components: &[C]) -> Vec<V> {
     // Phase 1 (read-only, fallible): clone every strict-descendant value out
     // FIRST, before unlinking anything. A `V::clone` panic here unwinds with the
     // trie and `len` completely untouched. This also doubles as the
@@ -854,7 +853,7 @@ where
 
   /// Removes the value at `key` *and* every strict descendant (node-inclusive),
   /// returning the number of values removed. Never clones a `V`.
-  pub(crate) fn delete_prefix(&mut self, components: &[C::Owned]) -> usize {
+  pub(crate) fn delete_prefix(&mut self, components: &[C]) -> usize {
     // Read-only existence check: if nothing is stored at or below `key`, there is
     // nothing to remove, so skip the copy-on-write entirely (preserving structural
     // sharing) and leave `len` alone. The traversal is fallible (user comparisons)
@@ -880,7 +879,7 @@ where
   /// Removes the value at `key` *and* every strict descendant (node-inclusive) and
   /// returns their values in ascending key order (the value at `key` itself, if
   /// any, first). Clones values out before unlinking.
-  pub(crate) fn drain_prefix(&mut self, components: &[C::Owned]) -> Vec<V> {
+  pub(crate) fn drain_prefix(&mut self, components: &[C]) -> Vec<V> {
     // Phase 1 (read-only, fallible): clone the value at `key` (which sorts before
     // all descendants) then every strict-descendant value, in ascending key order,
     // BEFORE unlinking anything. A `V::clone` panic here unwinds with the trie and
@@ -910,7 +909,7 @@ where
 #[cfg(test)]
 impl<P, C, V> Root<P, C, V>
 where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord,
   P: SharedPointerKind,
 {
   /// Test-only: number of direct edges from the root.
@@ -947,7 +946,6 @@ where
 /// in key order. Shared by the public `values` / `descendants` iterators.
 pub(crate) struct ValueIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   stack: Vec<&'a Node<P, C, V>>,
@@ -955,7 +953,6 @@ where
 
 impl<'a, P, C, V> ValueIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   #[inline]
@@ -971,7 +968,6 @@ where
 
 impl<'a, P, C, V> Iterator for ValueIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   type Item = &'a V;
@@ -1021,8 +1017,7 @@ impl<'a, V> Iterator for SliceIter<'a, V> {
 /// valueless single-child child by extending the edge label.
 fn normalize_child<P, C, V>(node: &mut Node<P, C, V>, i: usize)
 where
-  C: ?Sized + ToOwned + Ord,
-  C::Owned: Clone,
+  C: Clone,
   V: Clone,
   P: SharedPointerKind,
 {
@@ -1041,13 +1036,13 @@ where
       // any value still in flight up the call stack (a `remove`/`drain` return).
       //
       // This runs post-commit (the value is already taken/unlinked), so it must
-      // not unwind on user code: it performs NO `C::Owned`/`V` clone and no `Ord`.
+      // not unwind on user code: it performs NO `C`/`V` clone and no `Ord`.
       // The lone allocation (the merged label) can only fail with OOM, which aborts
       // rather than unwinds (see the crate panic-safety docs), so the in-flight
       // return value is never dropped by an unwind here.
       let merged_len =
         node.children[i].label.len() + node.children[i].child.children[0].label.len();
-      let mut merged: Vec<C::Owned> = Vec::with_capacity(merged_len);
+      let mut merged: Vec<C> = Vec::with_capacity(merged_len);
       let grandchild_edge = {
         let child = SharedPointer::make_mut(&mut node.children[i].child);
         child.children.pop().expect("checked exactly one child")
@@ -1063,16 +1058,16 @@ where
 
 /// Length of the longest common prefix between a stored `label` and the query
 /// components remaining in `key`. Consumes the matched components from `key`.
-pub(crate) fn match_prefix<C, I>(label: &[C::Owned], key: &mut core::iter::Peekable<I>) -> usize
+pub(crate) fn match_prefix<C, I>(label: &[C], key: &mut core::iter::Peekable<I>) -> usize
 where
-  C: ?Sized + ToOwned + PartialEq,
+  C: PartialEq,
   I: Iterator,
   I::Item: Borrow<C>,
 {
   let mut shared = 0;
-  for owned in label {
+  for c in label {
     match key.peek() {
-      Some(item) if Borrow::<C>::borrow(owned) == item.borrow() => {
+      Some(item) if c == item.borrow() => {
         shared += 1;
         key.next();
       }
@@ -1082,55 +1077,34 @@ where
   shared
 }
 
-/// Length of the longest common prefix of two owned component slices, compared
-/// by borrowing each element to `&C` (so only `C: PartialEq` is needed, not
-/// `C::Owned: PartialEq`).
-pub(crate) fn common_len<C>(a: &[C::Owned], b: &[C::Owned]) -> usize
+/// Length of the longest common prefix of two component slices.
+pub(crate) fn common_len<C>(a: &[C], b: &[C]) -> usize
 where
-  C: ?Sized + ToOwned + PartialEq,
+  C: PartialEq,
 {
-  a.iter()
-    .zip(b)
-    .take_while(|(x, y)| Borrow::<C>::borrow(*x) == Borrow::<C>::borrow(*y))
-    .count()
+  a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
-/// Appends owned copies of `labels` to `dst`, re-owning each component through its
-/// `&C` view (so only `C: ToOwned` is required, never `C::Owned: Clone`).
-fn extend_key<C>(dst: &mut Vec<C::Owned>, labels: &[C::Owned])
+/// Appends a clone of each of `labels` to `dst`.
+fn extend_key<C>(dst: &mut Vec<C>, labels: &[C])
 where
-  C: ?Sized + ToOwned,
+  C: Clone,
 {
-  dst.extend(labels.iter().map(|c| Borrow::<C>::borrow(c).to_owned()));
+  dst.extend(labels.iter().cloned());
 }
 
-/// Duplicates an owned component slice via the `&C` view, requiring only
-/// `C: ToOwned` (not `C::Owned: Clone`).
-fn dup_key<C>(key: &[C::Owned]) -> Vec<C::Owned>
+/// Clones a component slice into a fresh key vector.
+fn dup_key<C>(key: &[C]) -> Vec<C>
 where
-  C: ?Sized + ToOwned,
+  C: Clone,
 {
-  let mut out = Vec::with_capacity(key.len());
-  extend_key::<C>(&mut out, key);
-  out
-}
-
-/// Lexicographic comparison of two owned component slices through their `&C`
-/// views, requiring only `C: Ord` (not `C::Owned: Ord`).
-fn cmp_components<C>(a: &[C::Owned], b: &[C::Owned]) -> Ordering
-where
-  C: ?Sized + ToOwned + Ord,
-{
-  a.iter()
-    .map(|c| Borrow::<C>::borrow(c))
-    .cmp(b.iter().map(|c| Borrow::<C>::borrow(c)))
+  key.to_vec()
 }
 
 /// A frame in [`RevValueIter`]'s explicit DFS stack: either a subtree still to be
 /// expanded, or a value ready to be yielded once its descendants are exhausted.
 enum RevFrame<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   Node(&'a Node<P, C, V>),
@@ -1143,7 +1117,6 @@ where
 /// the node's own value last.
 pub(crate) struct RevValueIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   stack: Vec<RevFrame<'a, P, C, V>>,
@@ -1151,7 +1124,6 @@ where
 
 impl<'a, P, C, V> RevValueIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   #[inline]
@@ -1172,7 +1144,6 @@ where
 
 impl<'a, P, C, V> Iterator for RevValueIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   type Item = &'a V;
@@ -1203,15 +1174,14 @@ where
 /// without a second traversal.
 enum RangeFrame<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   Node {
     node: &'a Node<P, C, V>,
-    key: Vec<C::Owned>,
+    key: Vec<C>,
   },
   Yield {
-    key: Vec<C::Owned>,
+    key: Vec<C>,
     value: &'a V,
   },
 }
@@ -1221,17 +1191,15 @@ where
 /// is reconstructed by concatenating the root-to-node edge labels.
 pub(crate) struct RangeIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   stack: Vec<RangeFrame<'a, P, C, V>>,
-  upper: Bound<Vec<C::Owned>>,
+  upper: Bound<Vec<C>>,
   done: bool,
 }
 
 impl<P, C, V> RangeIter<'_, P, C, V>
 where
-  C: ?Sized + ToOwned,
   P: SharedPointerKind,
 {
   #[inline]
@@ -1246,10 +1214,10 @@ where
 
 impl<'a, P, C, V> Iterator for RangeIter<'a, P, C, V>
 where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord + Clone,
   P: SharedPointerKind,
 {
-  type Item = (Vec<C::Owned>, &'a V);
+  type Item = (Vec<C>, &'a V);
 
   fn next(&mut self) -> Option<Self::Item> {
     if self.done {
@@ -1277,8 +1245,8 @@ where
           // bound ends iteration: nothing remaining can be within range.
           let within = match &self.upper {
             Bound::Unbounded => true,
-            Bound::Included(ub) => cmp_components::<C>(&key, ub) != Ordering::Greater,
-            Bound::Excluded(ub) => cmp_components::<C>(&key, ub) == Ordering::Less,
+            Bound::Included(ub) => key.cmp(ub) != Ordering::Greater,
+            Bound::Excluded(ub) => key.cmp(ub) == Ordering::Less,
           };
           if within {
             return Some((key, value));
@@ -1305,11 +1273,11 @@ where
 fn seed_lower<'a, P, C, V>(
   stack: &mut Vec<RangeFrame<'a, P, C, V>>,
   node: &'a Node<P, C, V>,
-  key: Vec<C::Owned>,
-  suffix: &[C::Owned],
+  key: Vec<C>,
+  suffix: &[C],
   included: bool,
 ) where
-  C: ?Sized + ToOwned + Ord,
+  C: Ord + Clone,
   P: SharedPointerKind,
 {
   let Some(first) = suffix.first() else {

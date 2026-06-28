@@ -555,7 +555,7 @@ proptest! {
 
 // ----- panic-safety: a Clone that panics must not corrupt the trie ---------
 //
-// Every mutation builds its new pieces (cloning `C::Owned` labels / `V` values)
+// Every mutation builds its new pieces (cloning `C` labels / `V` values)
 // BEFORE detaching existing structure, so an unwind out of a user `Clone` leaves
 // the trie structurally valid (every pre-existing key still resolves) and `len`
 // accurate. These tests arm a `Clone` to panic on a chosen invocation, run the
@@ -587,7 +587,7 @@ fn tick(fuse: &'static std::thread::LocalKey<Cell<Option<usize>>>) {
   });
 }
 
-/// A component (`C` = `C::Owned`) whose `Clone` panics on an armed invocation.
+/// A component `C` whose `Clone` panics on an armed invocation.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct KeyBomb(u8);
 
@@ -641,7 +641,7 @@ fn merge_moves_labels_and_returns_value() {
   // "[1,2]" + "[1,2,3]": removing "[1,2]" leaves a valueless single-child node
   // that merges its label with the grandchild's. The merge MOVES both labels (it
   // owns them — the child was un-shared on the way down), so it performs no
-  // `C::Owned` clone and cannot panic: the removed value is always returned and
+  // `C` clone and cannot panic: the removed value is always returned and
   // `len` stays accurate. Arming the label fuse on the very first clone proves the
   // merge clones nothing.
   let mut t: Radix<KeyBomb, u32> = Radix::new();
@@ -692,7 +692,7 @@ fn drain_descendants_panic_in_value_clone_keeps_trie_intact() {
 #[test]
 fn remove_descendants_never_clones_values_and_survives_label_panic() {
   // `remove_descendants` is count-only: it must not clone any `V` (so a `V`
-  // whose clone always panics is fine), and a `C::Owned` clone panic during
+  // whose clone always panics is fine), and a `C` clone panic during
   // re-compression must still leave `len` accurate and survivors resolvable.
   let mut t: Radix<KeyBomb, ValBomb> = Radix::new();
   t.insert(&key(&[1]), ValBomb(1));

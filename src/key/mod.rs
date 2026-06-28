@@ -1,4 +1,6 @@
-use std::{borrow::ToOwned, vec::Vec};
+use core::borrow::Borrow;
+
+use std::vec::Vec;
 
 /// A key that decomposes into a sequence of [`Component`](RadixKey::Component)s.
 ///
@@ -6,8 +8,8 @@ use std::{borrow::ToOwned, vec::Vec};
 /// the *component* type, not over a concrete key type. Implementing `RadixKey`
 /// for your own key lets it be looked up and stored without the trie ever
 /// allocating during a read — [`components`](RadixKey::components) yields borrowed
-/// components, and only [`insert`](crate::unsync::Radix::insert) calls
-/// [`ToOwned::to_owned`] on each one to store it.
+/// components, and only [`insert`](crate::unsync::Radix::insert) clones each one
+/// (the component is `Clone`) to store it.
 ///
 /// # Zero-copy lookups
 ///
@@ -28,37 +30,32 @@ use std::{borrow::ToOwned, vec::Vec};
 /// assert_eq!(collected, b"abc");
 /// ```
 pub trait RadixKey {
-  /// The component the key decomposes into. The trie compares components by
-  /// equality ([`Ord`](core::cmp::Ord) on the read paths) and stores them owned.
-  type Component: ?Sized + ToOwned;
+  /// The owned, `Sized` component the key decomposes into. The trie compares
+  /// components by equality ([`Ord`](core::cmp::Ord) on the read paths) and stores
+  /// them by value (cloning each on insert).
+  type Component;
 
   /// Returns an iterator over the key's components, in order.
   ///
   /// Each item borrows as a [`Self::Component`]; an implementation may yield
   /// borrowed sub-slices (zero-copy) or owned components by value.
-  fn components(&self) -> impl Iterator<Item: core::borrow::Borrow<Self::Component>> + '_;
+  fn components(&self) -> impl Iterator<Item: Borrow<Self::Component>> + '_;
 }
 
-impl<C> RadixKey for [C]
-where
-  C: Clone,
-{
+impl<C> RadixKey for [C] {
   type Component = C;
 
   #[inline]
-  fn components(&self) -> impl Iterator<Item: core::borrow::Borrow<Self::Component>> + '_ {
+  fn components(&self) -> impl Iterator<Item: Borrow<Self::Component>> + '_ {
     self.iter()
   }
 }
 
-impl<C> RadixKey for Vec<C>
-where
-  C: Clone,
-{
+impl<C> RadixKey for Vec<C> {
   type Component = C;
 
   #[inline]
-  fn components(&self) -> impl Iterator<Item: core::borrow::Borrow<Self::Component>> + '_ {
+  fn components(&self) -> impl Iterator<Item: Borrow<Self::Component>> + '_ {
     self.iter()
   }
 }
@@ -67,7 +64,7 @@ impl RadixKey for str {
   type Component = char;
 
   #[inline]
-  fn components(&self) -> impl Iterator<Item: core::borrow::Borrow<Self::Component>> + '_ {
+  fn components(&self) -> impl Iterator<Item: Borrow<Self::Component>> + '_ {
     // A `str` is character-addressed, not byte-addressed: each component is a
     // `char`. A `str` key and a `Vec<char>` / `[char]` key over the same
     // characters therefore decompose identically and address the same trie path.

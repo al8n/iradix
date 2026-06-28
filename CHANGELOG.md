@@ -5,8 +5,8 @@
 ### Added — go-immutable-radix parity
 
 Ordered operations on both `unsync::Radix` and `sync::Radix`. Ordered queries
-return reconstructed keys as `Vec<C::Owned>`; value-only iterators stay
-decompose-only and `V`-bound-free.
+return reconstructed keys as `Vec<C>`; value-only iterators stay decompose-only
+and `V`-bound-free.
 
 - `minimum` / `maximum`: the smallest / largest key (component lexicographic
   order) and its value.
@@ -22,6 +22,21 @@ decompose-only and `V`-bound-free.
   honoring every `Included` / `Excluded` / `Unbounded` combination on both ends.
 - `seek_lower_bound`: a forward cursor at the first entry with key `>= key`, then
   ascending (go's `SeekLowerBound`).
+
+### Changed — key model
+
+`RadixKey::Component` is now the owned, `Sized` component the trie stores, dropping
+the old `?Sized + ToOwned` model (no more `C::Owned`, `?Sized`, or `ToOwned`
+anywhere). Lookups stay zero-alloc: `components()` still yields `Item:
+Borrow<Component>`, so `[u8]` → `u8` and `str` → `char` keys walk by borrow. The
+component bounds are now `C: Ord` (reads), `C: Ord + Clone` (key-rebuilding ordered
+reads and all mutators).
+
+- **Intentional capability change:** a key whose component is an *unsized* type
+  (`Component = str` backed by `String`) is no longer supported — use an owned,
+  `Sized` component (a `String`, or a cheap-clone newtype segment) instead. `str`
+  keys (decomposed to `char`), `[u8]` / `Vec<u8>`, and owned-newtype-segment keys
+  all still work, and lookup is still zero-alloc.
 
 ### Fixed
 
