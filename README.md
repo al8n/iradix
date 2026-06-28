@@ -45,10 +45,11 @@ dependency on any of it: it is a plain, reusable container.
 - **Sync / unsync split.** [`unsync::Radix`] uses `Rc` (`!Send`, no atomics) and
   mutates in place via a direct `&mut self` copy-on-write handle.
   [`sync::Radix`] uses `Arc` (`Send + Sync`, auto-derived) and is an **immutable
-  persistent tree** (go-immutable-radix's `Tree`): mutate it either with a `Txn`
-  (an owned working copy — open with `txn()`, edit, then `commit()`) or with one-op
-  `&self` methods that each return the next tree. Both faces share one copy-on-write
-  core, so a `.clone()` and a snapshot are `O(1)` and structurally shared.
+  persistent tree** (go-immutable-radix's `Tree`): mutate it through a `Txn` (an
+  owned working copy — open with `txn()`, edit, then `commit()` into the next tree;
+  a one-shot edit is just `txn()` → edit → `commit()`). Both faces share one
+  copy-on-write core, so a `.clone()` and a snapshot are `O(1)` and structurally
+  shared.
 - **Path-compressed, ordered.** Edges live in the parent's `Vec`, sorted by their
   first component and located by binary search — no hashing.
 - **Prefix queries.** Inclusive [`get_ancestor`] (longest covered prefix),
@@ -88,7 +89,7 @@ Runnable, self-contained examples live in [`examples/`](examples/):
 | example | what it shows |
 |---|---|
 | [`unsync`](examples/unsync.rs) | `unsync::Radix` — exact lookup; longest-covered-prefix queries (`get_ancestor` / `strict_ancestor`); ordered queries (`minimum` / `maximum` / `range` / `seek_lower_bound`); node-inclusive prefix removal; and `O(1)` snapshot isolation. |
-| [`sync`](examples/sync.rs) | `sync::Radix` — lock-free concurrent reads (`Send + Sync`); the immutable one-op `insert` and a batching `Txn` → `commit`; and the lock-free shared-holder pattern with `arc_swap::ArcSwap<sync::Radix<…>>` (load to read; txn → commit → CAS to publish). |
+| [`sync`](examples/sync.rs) | `sync::Radix` — lock-free concurrent reads (`Send + Sync`); a one-shot `txn()` → edit → `commit()` and a batching `Txn` → `commit`; and the lock-free shared-holder pattern with `arc_swap::ArcSwap<sync::Radix<…>>` (load to read; txn → commit → CAS to publish). |
 
 Run them with:
 

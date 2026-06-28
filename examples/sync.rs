@@ -1,8 +1,8 @@
 //! `sync::Radix` — the immutable Tree + Txn model, and lock-free sharing.
 //!
 //! `sync::Radix` is an immutable, `O(1)`-clone snapshot (like go-immutable-radix's
-//! `Tree`). It never mutates in place: a one-op `&self` method returns the next
-//! tree, and a `Txn` (an owned working copy) batches edits before `commit`. `iradix`
+//! `Tree`). It never mutates in place: a `Txn` (an owned working copy) batches edits
+//! before `commit`, and a one-shot edit is just `txn()` → edit → `commit()`. `iradix`
 //! ships no built-in concurrent holder; this shows the lock-free pattern you build
 //! yourself with `arc_swap::ArcSwap<sync::Radix<…>>` — readers `load` a wait-free
 //! snapshot, and a writer publishes its committed tree with a compare-and-swap
@@ -23,7 +23,7 @@ use iradix::sync::Radix;
 
 fn main() {
   immutable_reads();
-  one_op_insert();
+  one_shot_edit();
   transaction_batch();
   lock_free_holder();
   println!("\nsync example: ok");
@@ -32,12 +32,13 @@ fn main() {
 /// `sync::Radix` is `Send + Sync`, so one immutable tree is read from many threads
 /// at once with no lock — reads borrow `&self`.
 fn immutable_reads() {
-  let t: Radix<char, u64> = [("a", 1u64), ("ab", 2), ("b", 3), ("c", 4)]
-    .into_iter()
-    .fold(Radix::new(), |t, (k, v)| {
-      let (next, _) = t.insert(k, v);
-      next
-    });
+  let t: Radix<char, u64> = {
+    let mut txn = Radix::new().txn();
+    for (k, v) in [("a", 1u64), ("ab", 2), ("b", 3), ("c", 4)] {
+      txn.insert(k, v);
+    }
+    txn.commit()
+  };
 
   let t = &t; // a shared reference is `Copy`, so each thread gets its own.
   let total: u64 = thread::scope(|s| {
@@ -52,19 +53,23 @@ fn immutable_reads() {
   println!("concurrent reads summed to {total}");
 }
 
-/// A one-op `&self` mutator returns the *new* tree; the original is frozen.
-fn one_op_insert() {
+/// A one-shot edit opens a `txn`, mutates, and `commit`s the *new* tree; each prior
+/// version stays frozen.
+fn one_shot_edit() {
   let base: Radix<char, u64> = Radix::new();
-  let (v1, prev) = base.insert("v", 1);
-  assert_eq!(prev, None);
 
-  let (v2, prev) = v1.insert("v", 2); // replaces, reporting the old value
-  assert_eq!(prev, Some(1));
+  let mut t = base.txn();
+  assert_eq!(t.insert("v", 1), None);
+  let v1 = t.commit();
+
+  let mut t = v1.txn();
+  assert_eq!(t.insert("v", 2), Some(1)); // replaces, reporting the old value
+  let v2 = t.commit();
 
   assert_eq!(base.get("v"), None); // original: still empty
   assert_eq!(v1.get("v"), Some(&1)); // first version: frozen at 1
   assert_eq!(v2.get("v"), Some(&2)); // newest version
-  println!("one-op insert produced v1=1 and v2=2, base still empty");
+  println!("one-shot edits produced v1=1 and v2=2, base still empty");
 }
 
 /// A `Txn` is an owned working copy: batch several edits, then `commit` into the

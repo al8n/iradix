@@ -622,9 +622,11 @@ fn split_panic_in_label_clone_keeps_trie_consistent() {
   t.insert(&key(&[1, 2, 3]), 100);
   assert_eq!(t.len(), 1);
 
-  // Building the inserted key's components clones its 3 elements first; the very
-  // next clone is the split's head label. Arm to fire there.
-  KEY_FUSE.with(|c| c.set(Some(3)));
+  // Insert is iterator-native: it clones only STORED components. The split first
+  // collects the divergent suffix (`[4]`, one clone), then the head/tail label
+  // clones. Arm to fire on the second clone — partway through the split's label
+  // copying, before the infallible splice.
+  KEY_FUSE.with(|c| c.set(Some(1)));
   let r = catch_unwind(AssertUnwindSafe(|| t.insert(&key(&[1, 2, 4]), 200)));
   KEY_FUSE.with(|c| c.set(None));
   assert!(r.is_err(), "the armed split clone must have panicked");

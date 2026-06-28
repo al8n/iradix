@@ -263,8 +263,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
-    self.inner.insert(&components, value)
+    self.inner.insert(key.components(), value)
   }
 
   /// Removes and returns the value at exactly `key`, if any.
