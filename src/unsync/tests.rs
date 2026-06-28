@@ -770,6 +770,38 @@ fn drain_prefix_on_shared_trie_returns_values_without_corrupting_snapshot() {
 }
 
 #[test]
+fn delete_prefix_may_clone_a_retained_ancestor_value() {
+  // The copy-on-write boundary: delete_prefix clones no REMOVED value, but on a
+  // shared trie it still duplicates the RETAINED ancestors on the path to the
+  // prefix — including their values, exactly like every mutator. This documents
+  // that the no-removed-value guarantee does NOT extend to retained ancestors.
+  let mut t: Radix<KeyBomb, ValBomb> = Radix::new();
+  t.insert(&key(&[1]), ValBomb(1)); // retained ancestor — has a value
+  t.insert(&key(&[1, 2]), ValBomb(2)); // the deleted prefix
+  let snap = t.clone(); // share the path
+  assert_eq!(t.len(), 2);
+
+  // Building the 2-element key clones 2 KeyBombs (KEY_FUSE disarmed). Arm the VALUE
+  // fuse on the first value clone: the COW copy of the retained ancestor `[1]`.
+  VAL_FUSE.with(|c| c.set(Some(0)));
+  let r = catch_unwind(AssertUnwindSafe(|| {
+    t.delete_prefix(key(&[1, 2]).as_slice())
+  }));
+  VAL_FUSE.with(|c| c.set(None));
+
+  assert!(
+    r.is_err(),
+    "copy-on-write of the retained ancestor's value panicked (the documented boundary)"
+  );
+  // Strong exception: the panic before any unlink leaves the trie and `len` intact.
+  assert_eq!(t.len(), 2);
+  assert_eq!(t.count_values(), 2);
+  assert_eq!(t.get(key(&[1]).as_slice()), Some(&ValBomb(1)));
+  assert_eq!(t.get(key(&[1, 2]).as_slice()), Some(&ValBomb(2)));
+  assert_eq!(snap.len(), 2);
+}
+
+#[test]
 fn remove_descendants_merge_moves_labels_keeps_len() {
   // Shape: root -> [1](v) -> [2](valueless) -> { [3] -> {[30](v),[31](v)}, [4](v) }.
   // Removing the strict descendants of [1,2,3] empties [3] (pruned), dropping the
