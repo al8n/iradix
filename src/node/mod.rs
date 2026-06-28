@@ -36,9 +36,9 @@ where
   pub(crate) child: SharedPointer<Node<P, C, V>, P>,
 }
 
-// Structural `Clone` (rust-type-conventions §8 exception): `SharedPointer::make_mut`
-// requires the pointee to be `Clone`, and a clone is taken only when a node is
-// shared between versions (refcount > 1).
+// `SharedPointer::make_mut` requires the pointee to be `Clone`; a clone is taken
+// only when a node is shared between versions (refcount > 1), i.e. on a real copy-
+// on-write of that path.
 impl<P, C, V> Clone for Edge<P, C, V>
 where
   C: Clone,
@@ -560,9 +560,9 @@ where
     // PRECONDITION: `key` is non-empty. The whole-trie (empty-prefix) case is
     // handled by the `Root` wrapper dropping its root pointer, so we never
     // `make_mut` a node we are about to clear — which would clone the very values
-    // being deleted (Codex finding). Here `make_mut` only copies ANCESTORS on the
-    // path to `key` (ordinary copy-on-write, shared by every mutator); the doomed
-    // subtree itself is dropped by unlinking its edge, never cloned.
+    // being deleted. Here `make_mut` only copies ANCESTORS on the path to `key`
+    // (ordinary copy-on-write, shared by every mutator); the doomed subtree itself
+    // is dropped by unlinking its edge, never cloned.
     let node = SharedPointer::make_mut(node_ptr);
     let first = &key[0];
 

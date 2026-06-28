@@ -87,8 +87,6 @@ impl<C, V> Radix<C, V> {
   }
 }
 
-// ----- reads (C: Ord, V-bound-free) ---------------------------------------
-
 impl<C, V> Radix<C, V>
 where
   C: Ord,
@@ -255,8 +253,6 @@ where
   }
 }
 
-// ----- mutators (C: Ord + Clone, V: Clone) --------------------------------
-
 impl<C, V> Radix<C, V>
 where
   C: Ord + Clone,
@@ -327,8 +323,6 @@ where
     self.inner.drain_prefix(&components)
   }
 }
-
-// ----- iterators ----------------------------------------------------------
 
 /// Iterator over references to every value in a [`Radix`], in key order.
 ///
