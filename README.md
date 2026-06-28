@@ -27,21 +27,20 @@ dependency on any of it: it is a plain, reusable container.
   are zero-copy. Foundational impls cover `[C]`, `Vec<C>`, and `str` (which is
   `char`-addressed). A `str` key and a `Vec<char>` key over the same characters
   address the same path.
-- **Persistent + structurally shared.** Built on
-  [`archery::SharedPointer`]: `make_mut` mutates in place at refcount 1 and
-  copies only when a node is shared, so old snapshots are never disturbed.
-- **Pick your pointer.** `Radix<C, V, P>` is generic over
-  [`archery::SharedPointerKind`]; [`LocalRadix`] uses `Rc` (`!Send`, no atomics)
-  and [`SyncRadix`] uses `Arc` (`Send + Sync`). `Send`/`Sync` are fully
-  auto-derived.
+- **Persistent + structurally shared.** A shared internal `node` core mutates in
+  place at refcount 1 and copies only when a node is shared, so old snapshots are
+  never disturbed. The reference-counting pointer is an internal detail.
+- **Sync / unsync split.** [`unsync::Radix`] uses `Rc` (`!Send`, no atomics);
+  [`sync::Radix`] uses `Arc` (`Send + Sync`, auto-derived). Both expose the same
+  direct `&mut self` copy-on-write mutation API.
 - **Path-compressed, ordered.** Edges live in the parent's `Vec`, sorted by their
   first component and located by binary search — no hashing.
 - **Prefix queries.** Inclusive [`get_ancestor`] (longest covered prefix),
-  [`strict_ancestor`], [`ancestors`], [`descendants`], and bulk
-  [`remove_descendants`] / [`drain_descendants`].
-- **Atomic multi-step writes.** A [`Txn`] batches several edits into one root
-  publish, and [`ConcurrentRadix`] wraps a shared trie with lock-free snapshot
-  reads and serialized single-writer transactions.
+  [`strict_ancestor`], `ancestors`, `descendants`, and bulk `remove_descendants`
+  / `drain_descendants`.
+- **Lock-free concurrent holder.** [`sync::ConcurrentRadix`] wraps a shared trie
+  with wait-free snapshot reads and compare-and-swap transactional writes (build
+  a private working copy, then `commit` — retry on conflict).
 - **`no_std` + `alloc`.** `std` and `alloc` are independent features.
 
 ## Installation
@@ -63,9 +62,9 @@ iradix = { version = "0.1", default-features = false, features = ["alloc"] }
 ### Insert, look up, and find the longest covering prefix
 
 ```rust
-use iradix::LocalRadix;
+use iradix::unsync::Radix;
 
-let mut trie: LocalRadix<u8, &str> = LocalRadix::new();
+let mut trie: Radix<u8, &str> = Radix::new();
 trie.insert(b"/a".as_slice(), "a");
 trie.insert(b"/a/b".as_slice(), "ab");
 
@@ -83,9 +82,9 @@ assert_eq!(trie.strict_ancestor(b"/a/b".as_slice()), Some(&"a"));
 ### Snapshots are O(1) and isolated
 
 ```rust
-use iradix::LocalRadix;
+use iradix::unsync::Radix;
 
-let mut trie: LocalRadix<u8, u32> = LocalRadix::new();
+let mut trie: Radix<u8, u32> = Radix::new();
 trie.insert(b"k".as_slice(), 1);
 
 let snapshot = trie.clone(); // O(1), no value clones
@@ -95,29 +94,34 @@ assert_eq!(snapshot.get(b"k".as_slice()), Some(&1)); // unaffected
 assert_eq!(trie.get(b"k".as_slice()), Some(&2));
 ```
 
-### Atomic multi-step write
+### Lock-free concurrent holder with transactional writes
 
 ```rust
-use iradix::SyncRadix;
+use iradix::sync::ConcurrentRadix;
 
-let mut trie: SyncRadix<u8, u32> = SyncRadix::new();
-let mut txn = trie.txn();
-txn.insert(b"a".as_slice(), 1);
-txn.insert(b"a/b".as_slice(), 2);
-txn.remove_descendants(b"a".as_slice()); // removes a/b but not a
-txn.commit(); // one publish
+let holder: ConcurrentRadix<u8, u32> = ConcurrentRadix::new();
 
-assert_eq!(trie.get(b"a".as_slice()), Some(&1));
-assert_eq!(trie.get(b"a/b".as_slice()), None);
+// `commit_with` builds a private working copy and publishes it with a CAS,
+// retrying automatically if a concurrent writer wins the race.
+holder.commit_with(|txn| {
+    txn.insert(b"a".as_slice(), 1);
+    txn.insert(b"a/b".as_slice(), 2);
+    txn.remove_descendants(b"a".as_slice()); // removes a/b but not a
+});
+
+// Readers take a wait-free, point-in-time snapshot.
+let snap = holder.load();
+assert_eq!(snap.get(b"a".as_slice()), Some(&1));
+assert_eq!(snap.get(b"a/b".as_slice()), None);
 ```
 
 ## Cargo features
 
 | feature | default | effect |
 |---|---|---|
-| `std` | yes | enables the `std` build and the wait-free [`ConcurrentRadix`] backend (`arc-swap`). |
-| `alloc` | no | `no_std` + heap; provides the `spin::RwLock` [`ConcurrentRadix`] backend. Independent of `std`. |
-| `lockfree-nostd` | no | **reserved** for a future `haphazard` lock-free `no_std` backend; not yet active (the `spin` backend stays in place). |
+| `std` | yes | enables the `std` build and the wait-free [`sync::ConcurrentRadix`] backend (`arc-swap`). |
+| `alloc` | no | `no_std` + heap; provides the `spin::RwLock` [`sync::ConcurrentRadix`] backend. Independent of `std`. |
+| `lockfree-nostd` | no | **reserved** for a future `haphazard` lock-free `no_std` backend; not yet active (it enables `alloc`, and the `spin` backend stays in place). |
 
 `std` and `alloc` are independent (`std` does **not** imply `alloc`). The crate
 always needs the heap, so the bare no-feature configuration does not compile —
@@ -145,20 +149,12 @@ be dual licensed as above, without any additional terms or conditions.
 
 [radix trie]: https://en.wikipedia.org/wiki/Radix_tree
 [`RadixKey`]: https://docs.rs/iradix/latest/iradix/trait.RadixKey.html
-[`Radix`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html
-[`LocalRadix`]: https://docs.rs/iradix/latest/iradix/type.LocalRadix.html
-[`SyncRadix`]: https://docs.rs/iradix/latest/iradix/type.SyncRadix.html
-[`Txn`]: https://docs.rs/iradix/latest/iradix/struct.Txn.html
-[`ConcurrentRadix`]: https://docs.rs/iradix/latest/iradix/struct.ConcurrentRadix.html
-[`get_ancestor`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html#method.get_ancestor
-[`strict_ancestor`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html#method.strict_ancestor
-[`ancestors`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html#method.ancestors
-[`descendants`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html#method.descendants
-[`remove_descendants`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html#method.remove_descendants
-[`drain_descendants`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html#method.drain_descendants
-[`clone`]: https://docs.rs/iradix/latest/iradix/struct.Radix.html#impl-Clone-for-Radix
-[`archery::SharedPointer`]: https://docs.rs/archery/latest/archery/shared_pointer/struct.SharedPointer.html
-[`archery::SharedPointerKind`]: https://docs.rs/archery/latest/archery/shared_pointer/kind/trait.SharedPointerKind.html
+[`unsync::Radix`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html
+[`sync::Radix`]: https://docs.rs/iradix/latest/iradix/sync/struct.Radix.html
+[`sync::ConcurrentRadix`]: https://docs.rs/iradix/latest/iradix/sync/struct.ConcurrentRadix.html
+[`get_ancestor`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html#method.get_ancestor
+[`strict_ancestor`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html#method.strict_ancestor
+[`clone`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html#impl-Clone-for-Radix
 [Github-url]: https://github.com/al8n/iradix
 [CI-url]: https://github.com/al8n/iradix/actions/workflows/ci.yml
 [doc-url]: https://docs.rs/iradix

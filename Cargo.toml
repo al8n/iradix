@@ -18,7 +18,10 @@ default = ["std"]
 # so each tier only layers on its own lock backend.
 std = ["dep:arc-swap"]
 alloc = ["dep:spin"]
-lockfree-nostd = ["dep:haphazard"]
+# `lockfree-nostd` is a no_std tier: it requires `alloc` so the `alloc`-as-`std`
+# alias and the `spin` fallback backend are present (the `haphazard` lock-free
+# backend is reserved; see `ConcurrentRadix`).
+lockfree-nostd = ["alloc", "dep:haphazard"]
 
 [dependencies]
 archery = { version = "1", default-features = false }

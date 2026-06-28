@@ -2,16 +2,16 @@ use std::{borrow::ToOwned, vec::Vec};
 
 /// A key that decomposes into a sequence of [`Component`](RadixKey::Component)s.
 ///
-/// This is the bring-your-own-key seam: a [`Radix`](crate::Radix) is generic over
+/// This is the bring-your-own-key seam: a [`Radix`](crate::unsync::Radix) is generic over
 /// the *component* type, not over a concrete key type. Implementing `RadixKey`
 /// for your own key lets it be looked up and stored without the trie ever
 /// allocating during a read — [`components`](RadixKey::components) yields borrowed
-/// components, and only [`insert`](crate::Radix::insert) calls
+/// components, and only [`insert`](crate::unsync::Radix::insert) calls
 /// [`ToOwned::to_owned`] on each one to store it.
 ///
 /// # Zero-copy lookups
 ///
-/// A slice key (`&[C]`) yields `&C` borrows, so [`get`](crate::Radix::get) walks
+/// A slice key (`&[C]`) yields `&C` borrows, so [`get`](crate::unsync::Radix::get) walks
 /// the trie without allocating. A synthesized key may instead yield owned
 /// components by value (a `char` from a `str`, say); these still satisfy the
 /// [`Borrow`](core::borrow::Borrow) bound via the blanket `impl Borrow<T> for T`,
