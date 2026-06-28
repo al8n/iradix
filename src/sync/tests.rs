@@ -18,6 +18,45 @@ fn build<const N: usize>(entries: [(&[u8], u32); N]) -> Trie {
   t.commit()
 }
 
+// One-shot edit helpers: each opens a `txn`, applies a single mutator, and commits
+// the next immutable tree alongside what the mutator reported — so the persistence
+// assertions (the source tree stays frozen) read the same as a single committed edit.
+fn one_insert(t: &Trie, key: &[u8], value: u32) -> (Trie, Option<u32>) {
+  let mut txn = t.txn();
+  let prev = txn.insert(key, value);
+  (txn.commit(), prev)
+}
+
+fn one_remove(t: &Trie, key: &[u8]) -> (Trie, Option<u32>) {
+  let mut txn = t.txn();
+  let prev = txn.remove(key);
+  (txn.commit(), prev)
+}
+
+fn one_remove_descendants(t: &Trie, key: &[u8]) -> (Trie, usize) {
+  let mut txn = t.txn();
+  let n = txn.remove_descendants(key);
+  (txn.commit(), n)
+}
+
+fn one_delete_prefix(t: &Trie, key: &[u8]) -> (Trie, usize) {
+  let mut txn = t.txn();
+  let n = txn.delete_prefix(key);
+  (txn.commit(), n)
+}
+
+fn one_drain_descendants(t: &Trie, key: &[u8]) -> (Trie, Vec<u32>) {
+  let mut txn = t.txn();
+  let drained = txn.drain_descendants(key);
+  (txn.commit(), drained)
+}
+
+fn one_drain_prefix(t: &Trie, key: &[u8]) -> (Trie, Vec<u32>) {
+  let mut txn = t.txn();
+  let drained = txn.drain_prefix(key);
+  (txn.commit(), drained)
+}
+
 // ----- Send/Sync contract (auto-derived, none explicit) -------------------
 
 const fn assert_send<T: Send>() {}
@@ -35,16 +74,16 @@ fn sync_radix_is_send_sync() {
   assert_sync::<Txn<u8, u32>>();
 }
 
-// ----- one-op `&self` mutators return a NEW tree (persistence) -------------
+// ----- a committed edit yields a NEW tree, leaving the source frozen (persistence) --
 
 #[test]
 fn new_is_empty_and_const() {
   const EMPTY: Trie = Radix::new();
   assert!(EMPTY.is_empty());
 
-  let (t, prev) = EMPTY.insert(&bytes(b"abc"), 1);
+  let (t, prev) = one_insert(&EMPTY, b"abc", 1);
   assert_eq!(prev, None);
-  let (t, prev) = t.insert(&bytes(b"abd"), 2);
+  let (t, prev) = one_insert(&t, b"abd", 2);
   assert_eq!(prev, None);
   assert_eq!(t.get(b"abc".as_slice()), Some(&1));
   assert_eq!(t.get(b"abd".as_slice()), Some(&2));
@@ -53,11 +92,11 @@ fn new_is_empty_and_const() {
 }
 
 #[test]
-fn one_op_insert_leaves_original_unchanged() {
+fn committed_insert_leaves_source_unchanged() {
   let base = build([(b"a", 1), (b"b", 2)]);
-  let (next, prev) = base.insert(&bytes(b"a"), 100);
+  let (next, prev) = one_insert(&base, b"a", 100);
   assert_eq!(prev, Some(1));
-  // The original is frozen; only the returned tree sees the change.
+  // The source is frozen; only the committed tree sees the change.
   assert_eq!(base.get(b"a".as_slice()), Some(&1));
   assert_eq!(base.len(), 2);
   assert_eq!(next.get(b"a".as_slice()), Some(&100));
@@ -65,31 +104,29 @@ fn one_op_insert_leaves_original_unchanged() {
 }
 
 #[test]
-fn one_op_remove_and_clear_persist() {
+fn committed_remove_persists() {
   let base = build([(b"a", 1), (b"ab", 2), (b"b", 3)]);
 
-  let (after_remove, removed) = base.remove(b"a".as_slice());
+  let (after_remove, removed) = one_remove(&base, b"a");
   assert_eq!(removed, Some(1));
-  assert_eq!(base.get(b"a".as_slice()), Some(&1)); // original intact
+  assert_eq!(base.get(b"a".as_slice()), Some(&1)); // source intact
   assert_eq!(after_remove.get(b"a".as_slice()), None);
   assert_eq!(after_remove.len(), 2);
 
-  let empty = base.clear();
-  assert!(empty.is_empty());
-  assert_eq!(base.len(), 3); // clear() returns a NEW empty tree
+  assert_eq!(base.len(), 3); // source never changed
 }
 
 #[test]
-fn one_op_prefix_ops_persist() {
+fn committed_prefix_ops_persist() {
   let base = build([(b"x", 1), (b"x/y", 2), (b"x/y/z", 3), (b"y", 9)]);
 
-  let (kept, n) = base.remove_descendants(b"x".as_slice());
+  let (kept, n) = one_remove_descendants(&base, b"x");
   assert_eq!(n, 2);
   assert_eq!(kept.get(b"x".as_slice()), Some(&1)); // strict: self kept
   assert_eq!(kept.len(), 2);
   assert!(kept.is_canonical());
 
-  let (nuked, n) = base.delete_prefix(b"x".as_slice());
+  let (nuked, n) = one_delete_prefix(&base, b"x");
   assert_eq!(n, 3);
   assert_eq!(nuked.get(b"x".as_slice()), None); // node-inclusive: self gone
   assert_eq!(nuked.get(b"y".as_slice()), Some(&9));
@@ -102,19 +139,19 @@ fn one_op_prefix_ops_persist() {
 }
 
 #[test]
-fn one_op_drain_returns_values_and_persists() {
+fn committed_drain_returns_values_and_persists() {
   let base = build([(b"a", 1), (b"a/b", 2), (b"a/b/c", 3)]);
 
-  let (after, mut drained) = base.drain_descendants(b"a".as_slice());
+  let (after, mut drained) = one_drain_descendants(&base, b"a");
   drained.sort_unstable();
   assert_eq!(drained, vec![2, 3]);
   assert_eq!(after.get(b"a".as_slice()), Some(&1));
   assert_eq!(after.get(b"a/b".as_slice()), None);
-  // base keeps everything (drain clones values out; original tree unchanged).
+  // base keeps everything (drain clones values out; source tree unchanged).
   assert_eq!(base.len(), 3);
   assert_eq!(base.get(b"a/b/c".as_slice()), Some(&3));
 
-  let (after_prefix, drained) = base.drain_prefix(b"a".as_slice());
+  let (after_prefix, drained) = one_drain_prefix(&base, b"a");
   assert_eq!(drained, vec![1, 2, 3]); // node-inclusive, ascending
   assert!(after_prefix.is_empty());
   assert_eq!(base.len(), 3);
@@ -244,8 +281,8 @@ fn from_iterator_builds_tree() {
 #[test]
 fn clone_is_snapshot_isolated() {
   let snap = build([(b"k", 1)]);
-  let (live, _) = snap.insert(&bytes(b"k"), 2);
-  let (live, _) = live.insert(&bytes(b"k2"), 3);
+  let (live, _) = one_insert(&snap, b"k", 2);
+  let (live, _) = one_insert(&live, b"k2", 3);
   assert_eq!(snap.get(b"k".as_slice()), Some(&1));
   assert_eq!(snap.get(b"k2".as_slice()), None);
   assert_eq!(live.get(b"k".as_slice()), Some(&2));
@@ -254,7 +291,7 @@ fn clone_is_snapshot_isolated() {
 #[test]
 fn unchanged_subtree_is_shared() {
   let snap = build([(b"a/x", 1), (b"b/y", 2)]);
-  let (live, _) = snap.insert(&bytes(b"a/z"), 3); // touches only "a"
+  let (live, _) = one_insert(&snap, b"a/z", 3); // touches only "a"
 
   let snap_b = snap.edge_child(&b'b').expect("b edge");
   let t_b = live.edge_child(&b'b').expect("b edge");
@@ -286,7 +323,7 @@ fn txn_unchanged_subtree_is_shared_after_commit() {
 fn drain_shared_subtree_clones_not_moves() {
   let snap = build([(b"a", 1), (b"a/b", 2), (b"a/b/c", 3)]);
 
-  let (live, mut drained) = snap.drain_descendants(b"a".as_slice());
+  let (live, mut drained) = one_drain_descendants(&snap, b"a");
   drained.sort_unstable();
   assert_eq!(drained, vec![2, 3]);
   assert_eq!(live.get(b"a".as_slice()), Some(&1));
@@ -302,7 +339,7 @@ fn drain_shared_subtree_clones_not_moves() {
 #[test]
 fn remove_descendants_keeps_self() {
   let base = build([(b"a", 1), (b"ab", 2), (b"ac", 3), (b"b", 4)]);
-  let (t, n) = base.remove_descendants(b"a".as_slice());
+  let (t, n) = one_remove_descendants(&base, b"a");
   assert_eq!(n, 2);
   assert_eq!(t.get(b"a".as_slice()), Some(&1));
   assert_eq!(t.get(b"b".as_slice()), Some(&4));
@@ -452,13 +489,13 @@ proptest! {
 }
 
 #[test]
-fn one_op_insert_preserves_each_prior_version() {
-  // A chain of one-op inserts: every intermediate tree stays frozen at its own
+fn committed_insert_preserves_each_prior_version() {
+  // A chain of committed inserts: every intermediate tree stays frozen at its own
   // contents — persistence across the whole history, not just the last snapshot.
   let v0: Trie = Radix::new();
-  let (v1, _) = v0.insert(&bytes(b"a"), 1);
-  let (v2, _) = v1.insert(&bytes(b"b"), 2);
-  let (v3, _) = v2.insert(&bytes(b"c"), 3);
+  let (v1, _) = one_insert(&v0, b"a", 1);
+  let (v2, _) = one_insert(&v1, b"b", 2);
+  let (v3, _) = one_insert(&v2, b"c", 3);
 
   assert_eq!(v0.len(), 0);
   assert_eq!(v1.len(), 1);
@@ -488,13 +525,13 @@ fn min_max_empty_and_populated() {
 fn delete_prefix_is_node_inclusive_and_vs_remove_descendants() {
   let base = build([(b"x", 1), (b"x/y", 2), (b"x/y/z", 3), (b"y", 9)]);
 
-  let (keep, n) = base.remove_descendants(b"x".as_slice());
+  let (keep, n) = one_remove_descendants(&base, b"x");
   assert_eq!(n, 2);
   assert_eq!(keep.get(b"x".as_slice()), Some(&1)); // kept
   assert_eq!(keep.len(), 2);
   assert!(keep.is_canonical());
 
-  let (nuke, n) = base.delete_prefix(b"x".as_slice());
+  let (nuke, n) = one_delete_prefix(&base, b"x");
   assert_eq!(n, 3);
   assert_eq!(nuke.get(b"x".as_slice()), None); // removed
   assert_eq!(nuke.get(b"y".as_slice()), Some(&9));
@@ -506,7 +543,7 @@ fn delete_prefix_is_node_inclusive_and_vs_remove_descendants() {
 fn drain_prefix_ascending_and_shared_clones() {
   let snap = build([(b"a", 1), (b"a/b", 2), (b"a/c", 3)]);
   // value at key first, then strict descendants ascending
-  let (live, drained) = snap.drain_prefix(b"a".as_slice());
+  let (live, drained) = one_drain_prefix(&snap, b"a");
   assert_eq!(drained, vec![1, 2, 3]);
   assert!(live.is_empty());
   // original intact (values cloned, not stolen)
@@ -603,8 +640,8 @@ proptest! {
     hi_k in key_strategy(),
     del in key_strategy(),
   ) {
-    // Build immutably from the entries, then exercise ordered reads and the
-    // one-op `drain_prefix` against the reference model.
+    // Build immutably from the entries, then exercise ordered reads and a
+    // committed `drain_prefix` against the reference model.
     let entries_keyed: Vec<(Vec<u8>, u32)> = entries.clone();
     let trie: Trie = entries_keyed.into_iter().collect();
     let mut model: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
@@ -650,7 +687,7 @@ proptest! {
     prop_assert_eq!(seek, model_range(&model, Bound::Included(del.as_slice()), Bound::Unbounded));
 
     // delete_prefix removes the at-or-below set; drain_prefix returns it ascending.
-    let (drained_trie, drained) = trie.drain_prefix(del.as_slice());
+    let (drained_trie, drained) = one_drain_prefix(&trie, del.as_slice());
     let want_drained: Vec<u32> = model
       .iter()
       .filter(|(k, _)| k.starts_with(&del))
@@ -735,9 +772,11 @@ fn split_panic_in_label_clone_keeps_txn_consistent() {
   t.insert(&key(&[1, 2, 3]), 100);
   assert_eq!(t.len(), 1);
 
-  // Building the inserted key's components clones its 3 elements first; the very
-  // next clone is the split's head label. Arm to fire there.
-  KEY_FUSE.with(|c| c.set(Some(3)));
+  // Insert is iterator-native: it clones only STORED components. The split first
+  // collects the divergent suffix (`[4]`, one clone), then the head/tail label
+  // clones. Arm to fire on the second clone — partway through the split's label
+  // copying, before the infallible splice.
+  KEY_FUSE.with(|c| c.set(Some(1)));
   let r = catch_unwind(AssertUnwindSafe(|| t.insert(&key(&[1, 2, 4]), 200)));
   KEY_FUSE.with(|c| c.set(None));
   assert!(r.is_err(), "the armed split clone must have panicked");

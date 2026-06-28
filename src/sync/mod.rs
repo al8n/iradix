@@ -6,11 +6,10 @@
 //! declares no explicit `unsafe impl Send`/`Sync` anywhere). Every mutation returns
 //! a *new* tree; the original is never observed to change.
 //!
-//! Mutate either with the one-op `&self` methods ([`insert`](Radix::insert),
-//! [`remove`](Radix::remove), …), each of which returns the next tree, or by
-//! opening a [`Txn`] — an owned working copy you edit freely and then
-//! [`commit`](Txn::commit) into the next immutable tree. This mirrors
-//! go-immutable-radix's `Tree` / `Txn` split.
+//! Mutation goes through a [`Txn`] — open one with [`txn`](Radix::txn), edit the
+//! owned working copy freely, then [`commit`](Txn::commit) it into the next
+//! immutable tree. A one-shot edit is just `let mut t = r.txn(); t.insert(...); let
+//! r = t.commit();`. This mirrors go-immutable-radix's `Tree` / `Txn` split.
 //!
 //! For a single-threaded trie that never shares a snapshot across threads, prefer
 //! the cheaper non-atomic [`crate::unsync`] face.
@@ -46,18 +45,15 @@ use crate::{
 /// both `C` and `V` are (auto-derived; the crate declares no explicit `unsafe impl`).
 ///
 /// A `Radix` never mutates in place. A [`clone`](Clone::clone) is O(1) and shares
-/// all structure with the original; each one-op mutator returns a *new* tree that
+/// all structure with the original; a committed edit produces a *new* tree that
 /// copies only the path from the root to the touched node, leaving every untouched
 /// subtree physically shared with the prior version. This makes snapshots free and
 /// isolation automatic.
 ///
-/// Mutate one of two ways:
-///
-/// - one-op `&self` methods ([`insert`](Radix::insert) / [`remove`](Radix::remove)
-///   / [`delete_prefix`](Radix::delete_prefix) / …), each returning the next tree
-///   alongside whatever the operation reports; or
-/// - a [`Txn`] (open with [`txn`](Radix::txn)) for a batch of edits, then
-///   [`commit`](Txn::commit) into the next tree.
+/// Mutation is via a [`Txn`]: open one with [`txn`](Radix::txn), edit the owned
+/// working copy with its `&mut self` mutators, then [`commit`](Txn::commit) into the
+/// next tree. A one-shot edit is just `let mut t = r.txn(); t.insert(...); let r =
+/// t.commit();`.
 ///
 /// `iradix` ships no built-in concurrent holder: to publish versions atomically to
 /// shared readers, hold the snapshot yourself — wrap it in an
@@ -69,10 +65,11 @@ use crate::{
 /// ```
 /// use iradix::sync::Radix;
 ///
-/// // One-op insert returns the NEW tree; the original is untouched.
+/// // A one-shot edit: open a txn, edit, commit. The original is untouched.
 /// let base: Radix<u8, u32> = Radix::new();
-/// let (t1, prev) = base.insert(b"abc".as_slice(), 1);
-/// assert_eq!(prev, None);
+/// let mut t = base.txn();
+/// assert_eq!(t.insert(b"abc".as_slice(), 1), None);
+/// let t1 = t.commit();
 /// assert_eq!(base.get(b"abc".as_slice()), None); // original unchanged
 /// assert_eq!(t1.get(b"abc".as_slice()), Some(&1));
 ///
@@ -89,8 +86,8 @@ use crate::{
 ///
 /// The struct itself puts no bound on `C`. Reads add `C: Ord`; the ordered reads
 /// that rebuild a key (`minimum` / `maximum` / `range` / `seek_lower_bound`) also
-/// add `C: Clone`; persistent mutators add `C: Ord + Clone, V: Clone`. Reads are
-/// `V`-bound-free and return `&V`.
+/// add `C: Clone`. Mutation lives on [`Txn`], whose mutators add
+/// `C: Ord + Clone, V: Clone`. Reads are `V`-bound-free and return `&V`.
 pub struct Radix<C, V> {
   inner: Root<ArcK, C, V>,
 }
@@ -143,14 +140,6 @@ impl<C, V> Radix<C, V> {
     Txn {
       working: self.inner.clone(),
     }
-  }
-
-  /// Returns an empty tree. (Provided for symmetry with the other one-op
-  /// mutators; equivalent to [`Radix::new`].)
-  #[inline]
-  #[must_use = "returns a new empty tree; sync::Radix is immutable"]
-  pub fn clear(&self) -> Self {
-    Self::new()
   }
 }
 
@@ -320,94 +309,6 @@ where
   }
 }
 
-impl<C, V> Radix<C, V>
-where
-  C: Ord + Clone,
-  V: Clone,
-{
-  /// Returns the tree with `value` inserted at `key`, alongside the previous value
-  /// if the key was already set. The original tree is unchanged.
-  ///
-  /// A one-shot [`txn`](Radix::txn) → mutate → [`commit`](Txn::commit); to apply
-  /// several edits, open a [`Txn`] yourself.
-  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
-  pub fn insert<K>(&self, key: &K, value: V) -> (Self, Option<V>)
-  where
-    K: RadixKey<Component = C> + ?Sized,
-  {
-    let mut t = self.txn();
-    let prev = t.insert(key, value);
-    (t.commit(), prev)
-  }
-
-  /// Returns the tree with the value at exactly `key` removed, alongside that value
-  /// if it was present. The original tree is unchanged.
-  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
-  pub fn remove<K>(&self, key: &K) -> (Self, Option<V>)
-  where
-    K: RadixKey<Component = C> + ?Sized,
-  {
-    let mut t = self.txn();
-    let prev = t.remove(key);
-    (t.commit(), prev)
-  }
-
-  /// Returns the tree with every *strict* descendant of `key` removed (the value at
-  /// `key`, if any, is kept), alongside the number removed. The original tree is
-  /// unchanged.
-  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
-  pub fn remove_descendants<K>(&self, key: &K) -> (Self, usize)
-  where
-    K: RadixKey<Component = C> + ?Sized,
-  {
-    let mut t = self.txn();
-    let removed = t.remove_descendants(key);
-    (t.commit(), removed)
-  }
-
-  /// Returns the tree with every *strict* descendant of `key` removed (the value at
-  /// `key`, if any, is kept), alongside the removed values. The original tree is
-  /// unchanged.
-  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
-  pub fn drain_descendants<K>(&self, key: &K) -> (Self, Vec<V>)
-  where
-    K: RadixKey<Component = C> + ?Sized,
-  {
-    let mut t = self.txn();
-    let drained = t.drain_descendants(key);
-    (t.commit(), drained)
-  }
-
-  /// Returns the tree with the value at `key` **and** every strict descendant
-  /// removed (node-inclusive; go-immutable-radix's `DeletePrefix`), alongside the
-  /// number removed. The original tree is unchanged.
-  ///
-  /// Contrast [`remove_descendants`](Radix::remove_descendants), which keeps the
-  /// value stored at `key` itself.
-  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
-  pub fn delete_prefix<K>(&self, key: &K) -> (Self, usize)
-  where
-    K: RadixKey<Component = C> + ?Sized,
-  {
-    let mut t = self.txn();
-    let removed = t.delete_prefix(key);
-    (t.commit(), removed)
-  }
-
-  /// Returns the tree with the value at `key` **and** every strict descendant
-  /// removed (node-inclusive), alongside the removed values in ascending key order
-  /// (the value at `key` itself, if any, first). The original tree is unchanged.
-  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
-  pub fn drain_prefix<K>(&self, key: &K) -> (Self, Vec<V>)
-  where
-    K: RadixKey<Component = C> + ?Sized,
-  {
-    let mut t = self.txn();
-    let drained = t.drain_prefix(key);
-    (t.commit(), drained)
-  }
-}
-
 // Builds a tree from `(key, value)` pairs whose key is a `Vec` of components,
 // inserting through one transaction. A clean generic `FromIterator` over arbitrary
 // `RadixKey` is not expressible (the item would have to name an associated type),
@@ -436,8 +337,9 @@ where
 /// the transaction was opened from is never affected; dropping a transaction without
 /// committing simply discards its edits.
 ///
-/// A transaction owns its data: it borrows nothing and has no lifetime, so it is
-/// freely movable (including across threads when `C` and `V` are `Send`).
+/// A transaction owns its data: it borrows nothing and has no lifetime. Because it
+/// is `Arc`-backed, `Txn<C, V>` is `Send` / `Sync` — movable and shareable across
+/// threads — exactly when both `C` and `V` are `Send + Sync`.
 ///
 /// # Examples
 ///
@@ -583,8 +485,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
-    self.working.insert(&components, value)
+    self.working.insert(key.components(), value)
   }
 
   /// Removes and returns the value at exactly `key` in the working copy, if any.

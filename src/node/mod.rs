@@ -356,28 +356,43 @@ where
   V: Clone,
   P: SharedPointerKind,
 {
-  /// Inserts `value` at `key` in the subtree rooted at `node_ptr`, copying on
-  /// write. Returns the previous value if the exact key was already set.
-  pub(crate) fn insert(
+  /// Inserts `value` at the components yielded by `key` in the subtree rooted at
+  /// `node_ptr`, copying on write. Returns the previous value if the exact key was
+  /// already set.
+  ///
+  /// `key` is consumed lazily (mirroring the read path): only the components
+  /// actually STORED — the new leaf's or split-suffix label — are cloned, so no
+  /// whole-key `Vec` is materialized.
+  pub(crate) fn insert<I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C],
+    key: &mut core::iter::Peekable<I>,
     value: V,
-  ) -> Option<V> {
+  ) -> Option<V>
+  where
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
     let node = SharedPointer::make_mut(node_ptr);
 
-    let Some(first) = key.first() else {
+    if key.peek().is_none() {
       return node.value.replace(value);
-    };
+    }
 
-    let i = match node.child_index(first.borrow()) {
+    let first = key.peek().expect("key has a next component").borrow();
+    let i = match node.child_index(first) {
       Err(insert_at) => {
-        // No edge begins with `first`: create a fresh leaf edge here.
+        // No edge begins with `first`: the new leaf's label is the WHOLE remaining
+        // key. Consuming the iterator yields the peeked `first` too.
+        let label: Box<[C]> = key
+          .map(|c| c.borrow().clone())
+          .collect::<Vec<C>>()
+          .into_boxed_slice();
         let leaf = Node {
           value: Some(value),
           children: Vec::new(),
         };
         let edge = Edge {
-          label: key.to_vec().into_boxed_slice(),
+          label,
           child: SharedPointer::new(leaf),
         };
         node.children.insert(insert_at, edge);
@@ -386,22 +401,24 @@ where
       Ok(i) => i,
     };
 
-    let shared = common_len::<C>(&node.children[i].label, key);
+    let shared = match_prefix::<C, _>(&node.children[i].label, key);
     let label_len = node.children[i].label.len();
 
     if shared == label_len {
-      // The whole edge label is consumed; descend into the child.
-      return Node::insert(&mut node.children[i].child, &key[shared..], value);
+      // The whole edge label is consumed; descend into the child with the same
+      // (now-advanced) key iterator.
+      return Node::insert(&mut node.children[i].child, key, value);
     }
 
     // Split edge `i` at `shared`. Build the COMPLETE replacement `mid` subtree —
     // its label clones, the reused old child (an O(1) pointer clone), the new
     // leaf, and the sorted child order — while edge `i` is still installed. Every
-    // fallible step (label `C::clone`, leaf allocation, the user `Ord` that
-    // orders the two children) therefore runs before anything is detached, so an
-    // unwind leaves the trie and `len` untouched. Only the final single move
-    // splices `mid` in, dropping the old edge (whose child was already cloned, so
-    // no subtree is lost).
+    // fallible step (collecting `key_rest`, the `head`/`tail` clones, the leaf
+    // allocation, the user `Ord` that orders the two children) therefore runs
+    // before anything is detached, so an unwind leaves the trie and `len`
+    // untouched. Only the final single move splices `mid` in, dropping the old
+    // edge (whose child was already cloned, so no subtree is lost).
+    let key_rest: Vec<C> = key.map(|c| c.borrow().clone()).collect();
     let (head, tail) = node.children[i].label.split_at(shared);
     let head: Box<[C]> = head.to_vec().into_boxed_slice();
     let tail: Box<[C]> = tail.to_vec().into_boxed_slice();
@@ -410,7 +427,6 @@ where
       child: node.children[i].child.clone(),
     };
 
-    let key_rest = &key[shared..];
     let mid_node = if key_rest.is_empty() {
       // The new key ends exactly at the split point: value lives on `mid`.
       Node {
@@ -421,7 +437,7 @@ where
       // The new key diverges from the old child within this edge: two children in
       // sorted order. The ordering `Ord` is the last fallible step before splicing.
       let new_leaf = Edge {
-        label: key_rest.to_vec().into_boxed_slice(),
+        label: key_rest.into_boxed_slice(),
         child: SharedPointer::new(Node {
           value: Some(value),
           children: Vec::new(),
@@ -782,12 +798,19 @@ where
   V: Clone,
   P: SharedPointerKind,
 {
-  /// Inserts `value` at `key`, returning the previous value if the key was set.
-  pub(crate) fn insert(&mut self, components: &[C], value: V) -> Option<V> {
+  /// Inserts `value` at the components yielded by `key`, returning the previous
+  /// value if the key was set. `key` is consumed lazily; only stored components are
+  /// cloned (no whole-key `Vec`).
+  pub(crate) fn insert<I>(&mut self, key: I, value: V) -> Option<V>
+  where
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
+    let mut key = key.peekable();
     let root = self
       .root
       .get_or_insert_with(|| SharedPointer::new(Node::new()));
-    let old = Node::insert(root, components, value);
+    let old = Node::insert(root, &mut key, value);
     if old.is_none() {
       self.len += 1;
     }

@@ -29,10 +29,9 @@ sharing — bring-your-own-key, `no_std + alloc`, parameterized over `Rc` / `Arc
     handle; `.clone()` is an `O(1)` structurally-shared snapshot.
   - `sync::Radix<C, V>` — `Arc`-backed, `Send + Sync` (auto-derived); an **immutable
     persistent tree** (go-immutable-radix's `Tree`) with cross-thread-shareable
-    snapshots. Mutate it via a `Txn` (`sync::Txn<C, V>`, an owned working copy —
-    open with `txn()`, edit, then `commit()`) or with one-op `&self` methods
-    (`insert` / `remove` / `delete_prefix` / …) that each return the next tree.
-    Build one in bulk from `(Vec<C>, V)` pairs via `FromIterator`.
+    snapshots. Writes are via a `Txn` (`sync::Txn<C, V>`, an owned working copy —
+    open with `txn()`, edit, then `commit()` into the next tree); there are no one-op
+    `&self` mutators. Build one in bulk from `(Vec<C>, V)` pairs via `FromIterator`.
 - Path-compressed edges held in the parent's `Vec`, sorted by first component and
   located by binary search — no hashing.
 
@@ -56,8 +55,8 @@ sharing — bring-your-own-key, `no_std + alloc`, parameterized over `Rc` / `Arc
 
 ### Mutators (`C: Ord + Clone`, `V: Clone`)
 
-The same set on every face — `&mut self` on `unsync::Radix` and `sync::Txn`;
-`&self`-returning-the-next-tree on `sync::Radix`:
+The same set on every write face — `&mut self` on `unsync::Radix` and `sync::Txn`
+(`sync::Radix` writes go through a `sync::Txn`, never one-op `&self` mutators):
 
 - `insert`, `remove`, `clear`.
 - Strict — keep the value at the key: `remove_descendants` (count) /
