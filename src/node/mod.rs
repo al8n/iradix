@@ -463,16 +463,25 @@ where
     None
   }
 
-  /// Removes the value at `key` from the subtree rooted at `node_ptr`, copying on
-  /// write and re-compressing. Returns the removed value if present.
-  pub(crate) fn remove(
+  /// Removes the value at the components yielded by `key` from the subtree rooted
+  /// at `node_ptr`, copying on write and re-compressing. Returns the removed value
+  /// if present.
+  ///
+  /// `key` is consumed lazily (mirroring [`insert`](Node::insert) and the read
+  /// path): each matched edge label is walked through the same `Peekable`, so no
+  /// whole-key `Vec` is materialized.
+  pub(crate) fn remove<I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C],
+    key: &mut core::iter::Peekable<I>,
     len: &mut usize,
-  ) -> Option<V> {
+  ) -> Option<V>
+  where
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
     let node = SharedPointer::make_mut(node_ptr);
 
-    let Some(first) = key.first() else {
+    if key.peek().is_none() {
       // The value `take` is the single infallible commit point: decrement `len`
       // here, after the fallible make-mut/traversal above has already succeeded
       // and before any (fallible) re-compression on the way back up. An unwind
@@ -482,15 +491,18 @@ where
         *len -= 1;
       }
       return removed;
-    };
+    }
 
-    let i = node.child_index(first.borrow()).ok()?;
-    let shared = common_len::<C>(&node.children[i].label, key);
+    let first = key.peek().expect("key has a next component").borrow();
+    let i = node.child_index(first).ok()?;
+    let shared = match_prefix::<C, _>(&node.children[i].label, key);
     if shared != node.children[i].label.len() {
+      // The key diverges within this edge (or runs out mid-edge): no exact match
+      // below, so nothing to remove.
       return None;
     }
 
-    let removed = Node::remove(&mut node.children[i].child, &key[shared..], len);
+    let removed = Node::remove(&mut node.children[i].child, key, len);
     if removed.is_some() {
       normalize_child(node, i);
     }
@@ -508,14 +520,18 @@ where
   /// unwind during re-compression leaves `len` already accurate with every
   /// surviving key resolvable. Callers still capture any values they need first
   /// (see [`crate::unsync::Radix::drain_descendants`]).
-  pub(crate) fn unlink_descendants(
+  pub(crate) fn unlink_descendants<I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C],
+    key: &mut core::iter::Peekable<I>,
     len: &mut usize,
-  ) -> usize {
+  ) -> usize
+  where
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
     let node = SharedPointer::make_mut(node_ptr);
 
-    let Some(first) = key.first() else {
+    if key.peek().is_none() {
       // `key` ends here: every child subtree is a strict descendant — drop them.
       // Counting and clearing are infallible, so `len` is corrected atomically
       // with the unlink (after the fallible make-mut above).
@@ -523,24 +539,25 @@ where
       *len -= removed;
       node.children.clear();
       return removed;
-    };
+    }
 
-    let Ok(i) = node.child_index(first.borrow()) else {
+    let first = key.peek().expect("key has a next component").borrow();
+    let Ok(i) = node.child_index(first) else {
       return 0;
     };
-    let shared = common_len::<C>(&node.children[i].label, key);
+    let shared = match_prefix::<C, _>(&node.children[i].label, key);
     let label_len = node.children[i].label.len();
 
     if shared == label_len {
       // Whole label consumed: recurse (which unlinks and corrects `len` deeper),
       // then re-canonicalize this node — the (fallible) normalize runs only after
       // the deeper unlink already adjusted `len`.
-      let removed = Node::unlink_descendants(&mut node.children[i].child, &key[shared..], len);
+      let removed = Node::unlink_descendants(&mut node.children[i].child, key, len);
       if removed > 0 {
         normalize_child(node, i);
       }
       removed
-    } else if shared == key.len() {
+    } else if key.peek().is_none() {
       // `key` ends mid-edge: the whole child subtree is strict descendants.
       // Count and remove are infallible, so `len` is corrected with the unlink.
       let removed = node.children[i].child.count();
@@ -568,11 +585,15 @@ where
   /// on the way up.
   ///
   /// [`unlink_descendants`]: Node::unlink_descendants
-  pub(crate) fn unlink_prefix(
+  pub(crate) fn unlink_prefix<I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
-    key: &[C],
+    key: &mut core::iter::Peekable<I>,
     len: &mut usize,
-  ) -> usize {
+  ) -> usize
+  where
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
     // PRECONDITION: `key` is non-empty. The whole-trie (empty-prefix) case is
     // handled by the `Root` wrapper dropping its root pointer, so we never
     // `make_mut` a node we are about to clear — which would clone the very values
@@ -580,15 +601,18 @@ where
     // (ordinary copy-on-write, shared by every mutator); the doomed subtree itself
     // is dropped by unlinking its edge, never cloned.
     let node = SharedPointer::make_mut(node_ptr);
-    let first = &key[0];
+    let first = key
+      .peek()
+      .expect("unlink_prefix requires a non-empty key")
+      .borrow();
 
-    let Ok(i) = node.child_index(first.borrow()) else {
+    let Ok(i) = node.child_index(first) else {
       return 0;
     };
-    let shared = common_len::<C>(&node.children[i].label, key);
+    let shared = match_prefix::<C, _>(&node.children[i].label, key);
     let label_len = node.children[i].label.len();
 
-    if shared == key.len() {
+    if key.peek().is_none() {
       // `key` ends at or within this edge: the whole child subtree is at or below
       // `key`. Unlink the edge from this already-copied parent — that drops the
       // value at `key` and every descendant via the pointer, with NO `make_mut` on
@@ -604,7 +628,7 @@ where
     } else if shared == label_len {
       // Whole label consumed and `key` continues: recurse, then re-canonicalize
       // this node (which may now have a pruned-empty or single-child child).
-      let removed = Node::unlink_prefix(&mut node.children[i].child, &key[shared..], len);
+      let removed = Node::unlink_prefix(&mut node.children[i].child, key, len);
       if removed > 0 {
         normalize_child(node, i);
       }
@@ -817,69 +841,97 @@ where
     old
   }
 
-  /// Removes and returns the value at exactly `key`, if any.
-  pub(crate) fn remove(&mut self, components: &[C]) -> Option<V> {
+  /// Removes and returns the value at exactly the components yielded by
+  /// `make_key`, if any.
+  ///
+  /// `make_key` is a re-iterable key source called once per pass: a read-only
+  /// existence pass first, then (only when present) the mutate pass. Re-yielding a
+  /// fresh iterator per pass keeps the no-copy-on-absent guarantee while avoiding a
+  /// whole-key `Vec` — both passes walk the key lazily.
+  pub(crate) fn remove<F, I>(&mut self, make_key: F) -> Option<V>
+  where
+    F: Fn() -> I,
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
     // A read-only existence check first: a remove of an absent key must not
     // copy-on-write (and so must not disturb structural sharing). When the key
     // is present, every node on its root-to-value path genuinely changes, so the
     // eager copy-on-write in `Node::remove` is justified.
-    self.get(components.iter().map(Borrow::<C>::borrow))?;
+    self.get(make_key())?;
     let root = self.root.as_mut()?;
     // `Node::remove` decrements `len` at the value-`take` itself — after its
     // fallible make-mut/traversal succeeds — so a panic in a shared-node clone or
     // a user comparison on the way down leaves `len` and the trie consistent.
-    Node::remove(root, components, &mut self.len)
+    Node::remove(root, &mut make_key().peekable(), &mut self.len)
   }
 
-  /// Removes every *strict* descendant of `key` (the value at `key`, if any, is
-  /// kept), returning the number of values removed. Never clones a `V`.
-  pub(crate) fn remove_descendants(&mut self, components: &[C]) -> usize {
+  /// Removes every *strict* descendant of the components yielded by `make_key`
+  /// (the value at the key, if any, is kept), returning the number of values
+  /// removed. Never clones a `V`. `make_key` is a re-iterable key source called
+  /// once per pass (existence, then unlink), keeping no-copy-on-absent without a
+  /// whole-key `Vec`.
+  pub(crate) fn remove_descendants<F, I>(&mut self, make_key: F) -> usize
+  where
+    F: Fn() -> I,
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
     // Read-only existence check: nothing to remove means no copy-on-write (so
     // structural sharing is preserved) and no `len` change. This traversal is
     // fallible (user comparisons) but mutates nothing, so a panic is harmless.
-    if self
-      .descendants(components.iter().map(Borrow::<C>::borrow))
-      .next()
-      .is_none()
-    {
+    if self.descendants(make_key()).next().is_none() {
       return 0;
     }
     // `unlink_descendants` counts and unlinks the strict descendants, correcting
     // `len` atomically with the (infallible) unlink — and never cloning a `V`.
     match self.root.as_mut() {
-      Some(root) => Node::unlink_descendants(root, components, &mut self.len),
+      Some(root) => Node::unlink_descendants(root, &mut make_key().peekable(), &mut self.len),
       None => 0,
     }
   }
 
-  /// Removes every *strict* descendant of `key` and returns their values (the
-  /// value at `key`, if any, is kept). Clones values out before unlinking.
-  pub(crate) fn drain_descendants(&mut self, components: &[C]) -> Vec<V> {
+  /// Removes every *strict* descendant of the components yielded by `make_key` and
+  /// returns their values (the value at the key, if any, is kept). Clones values
+  /// out before unlinking. `make_key` is a re-iterable key source called once per
+  /// pass (capture, then unlink), keeping no-copy-on-absent without a whole-key
+  /// `Vec`.
+  pub(crate) fn drain_descendants<F, I>(&mut self, make_key: F) -> Vec<V>
+  where
+    F: Fn() -> I,
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
     // Phase 1 (read-only, fallible): clone every strict-descendant value out
     // FIRST, before unlinking anything. A `V::clone` panic here unwinds with the
     // trie and `len` completely untouched. This also doubles as the
     // nothing-to-drain check: an empty result means no copy-on-write (preserving
     // structural sharing).
-    let out: Vec<V> = self
-      .descendants(components.iter().map(Borrow::<C>::borrow))
-      .cloned()
-      .collect();
+    let out: Vec<V> = self.descendants(make_key()).cloned().collect();
     if out.is_empty() {
       return out;
     }
     // Phase 2: the values are safely captured, so commit the structural change.
     // `unlink_descendants` corrects `len` atomically with the (infallible) unlink.
     if let Some(root) = self.root.as_mut() {
-      Node::unlink_descendants(root, components, &mut self.len);
+      Node::unlink_descendants(root, &mut make_key().peekable(), &mut self.len);
     }
     out
   }
 
-  /// Removes the value at `key` *and* every strict descendant (node-inclusive),
-  /// returning the number of values removed. Clones no *removed* value — only the
-  /// copy-on-write path to `key` is duplicated, exactly like every other mutator.
-  pub(crate) fn delete_prefix(&mut self, components: &[C]) -> usize {
-    if components.is_empty() {
+  /// Removes the value at the components yielded by `make_key` *and* every strict
+  /// descendant (node-inclusive), returning the number of values removed. Clones no
+  /// *removed* value — only the copy-on-write path to the key is duplicated, exactly
+  /// like every other mutator. `make_key` is a re-iterable key source called once
+  /// per pass (existence, then unlink), keeping no-copy-on-absent without a
+  /// whole-key `Vec`.
+  pub(crate) fn delete_prefix<F, I>(&mut self, make_key: F) -> usize
+  where
+    F: Fn() -> I,
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
+    if make_key().next().is_none() {
       // Whole-trie delete: drop the root pointer outright. No `make_mut`, so not
       // even the root's own path is copied and no value is cloned.
       let removed = self.len;
@@ -891,13 +943,8 @@ where
     // nothing to remove, so skip the copy-on-write entirely (preserving structural
     // sharing) and leave `len` alone. The traversal is fallible (user comparisons)
     // but mutates nothing, so a panic here is harmless.
-    let nothing_here = self
-      .get(components.iter().map(Borrow::<C>::borrow))
-      .is_none()
-      && self
-        .descendants(components.iter().map(Borrow::<C>::borrow))
-        .next()
-        .is_none();
+    let nothing_here =
+      self.get(make_key()).is_none() && self.descendants(make_key()).next().is_none();
     if nothing_here {
       return 0;
     }
@@ -905,41 +952,48 @@ where
     // `len` atomically with the (infallible) unlink — unlinking the edge rather than
     // copying the doomed subtree, so no removed value is cloned.
     match self.root.as_mut() {
-      Some(root) => Node::unlink_prefix(root, components, &mut self.len),
+      Some(root) => Node::unlink_prefix(root, &mut make_key().peekable(), &mut self.len),
       None => 0,
     }
   }
 
-  /// Removes the value at `key` *and* every strict descendant (node-inclusive) and
-  /// returns their values in ascending key order (the value at `key` itself, if
-  /// any, first). Clones values out before unlinking.
-  pub(crate) fn drain_prefix(&mut self, components: &[C]) -> Vec<V> {
+  /// Removes the value at the components yielded by `make_key` *and* every strict
+  /// descendant (node-inclusive) and returns their values in ascending key order
+  /// (the value at the key itself, if any, first). Clones values out before
+  /// unlinking. `make_key` is a re-iterable key source called once per pass
+  /// (capture, then unlink), keeping no-copy-on-absent without a whole-key `Vec`.
+  pub(crate) fn drain_prefix<F, I>(&mut self, make_key: F) -> Vec<V>
+  where
+    F: Fn() -> I,
+    I: Iterator,
+    I::Item: Borrow<C>,
+  {
+    if make_key().next().is_none() {
+      // Whole-trie drain: capture every value (the key is empty, so no key walk is
+      // needed), then drop the root pointer outright — no `make_mut`, no re-clone.
+      let out: Vec<V> = self.values().cloned().collect();
+      self.root = None;
+      self.len = 0;
+      return out;
+    }
     // Phase 1 (read-only, fallible): clone the value at `key` (which sorts before
     // all descendants) then every strict-descendant value, in ascending key order,
     // BEFORE unlinking anything. A `V::clone` panic here unwinds with the trie and
     // `len` completely untouched. The emptiness check also doubles as the
     // nothing-to-drain guard: an empty result means no copy-on-write.
     let mut out: Vec<V> = Vec::new();
-    if let Some(v) = self.get(components.iter().map(Borrow::<C>::borrow)) {
+    if let Some(v) = self.get(make_key()) {
       out.push(v.clone());
     }
-    out.extend(
-      self
-        .descendants(components.iter().map(Borrow::<C>::borrow))
-        .cloned(),
-    );
+    out.extend(self.descendants(make_key()).cloned());
     if out.is_empty() {
       return out;
     }
     // Phase 2: the values are safely captured, so commit the structural change.
     // `unlink_prefix` unlinks the doomed edge rather than copying the subtree, so it
     // never re-clones the values phase 1 already captured.
-    if components.is_empty() {
-      // Whole-trie drain: drop the root pointer (no `make_mut`, no re-clone).
-      self.root = None;
-      self.len = 0;
-    } else if let Some(root) = self.root.as_mut() {
-      Node::unlink_prefix(root, components, &mut self.len);
+    if let Some(root) = self.root.as_mut() {
+      Node::unlink_prefix(root, &mut make_key().peekable(), &mut self.len);
     }
     out
   }

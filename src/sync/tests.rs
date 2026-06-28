@@ -887,8 +887,9 @@ fn delete_prefix_may_clone_a_retained_ancestor_value() {
   let mut t = source.txn(); // shares the path with `source`
   assert_eq!(t.len(), 2);
 
-  // Building the 2-element key clones 2 KeyBombs (KEY_FUSE disarmed). Arm the VALUE
-  // fuse on the first value clone: the COW copy of the retained ancestor `[1]`.
+  // No key is materialized (delete_prefix is iterator-native), so the only value
+  // clone is the COW copy of the retained ancestor `[1]` on the path to the prefix.
+  // Arm the VALUE fuse on that first value clone.
   VAL_FUSE.with(|c| c.set(Some(0)));
   let r = catch_unwind(AssertUnwindSafe(|| {
     t.delete_prefix(key(&[1, 2]).as_slice())

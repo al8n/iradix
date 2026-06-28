@@ -67,6 +67,12 @@ The same set on every write face — `&mut self` on `unsync::Radix` and `sync::T
   Removal clones no *removed* value; only retained values on the copied
   copy-on-write path may be cloned, as in every mutator.
 
+  Every mutator is allocation-free with respect to the key: `insert` / `remove` /
+  `remove_descendants` / `drain_descendants` / `delete_prefix` / `drain_prefix`
+  walk the key lazily over its components (iterator-native, no per-call key `Vec`),
+  while still preserving the no-copy-on-absent guarantee — an absent key or prefix
+  triggers no copy-on-write at all.
+
 ### Concurrency & `no_std`
 
 - No built-in concurrent holder: `sync::Radix` is an immutable, `O(1)`-clone tree,

@@ -493,8 +493,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
-    self.working.remove(&components)
+    self.working.remove(|| key.components())
   }
 
   /// Removes every *strict* descendant of `key` (the value at `key`, if any, is
@@ -504,8 +503,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
-    self.working.remove_descendants(&components)
+    self.working.remove_descendants(|| key.components())
   }
 
   /// Removes every *strict* descendant of `key` and returns their values (the
@@ -514,8 +512,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
-    self.working.drain_descendants(&components)
+    self.working.drain_descendants(|| key.components())
   }
 
   /// Removes the value at `key` **and** every strict descendant (node-inclusive;
@@ -529,8 +526,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
-    self.working.delete_prefix(&components)
+    self.working.delete_prefix(|| key.components())
   }
 
   /// Removes the value at `key` **and** every strict descendant (node-inclusive)
@@ -540,8 +536,7 @@ where
   where
     K: RadixKey<Component = C> + ?Sized,
   {
-    let components: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
-    self.working.drain_prefix(&components)
+    self.working.drain_prefix(|| key.components())
   }
 }
 
