@@ -542,10 +542,14 @@ where
   /// values removed and decrements `*len` by that amount.
   ///
   /// This is the node-inclusive counterpart to [`unlink_descendants`]: it also
-  /// drops the value stored exactly at `key`. The same panic-safety contract
-  /// holds — `len` is corrected atomically with the (infallible) clear/unlink,
-  /// after the fallible make-mut/traversal and before the (fallible, but
-  /// label-MOVING and therefore user-panic-free) `normalize_child` on the way up.
+  /// drops the value stored exactly at `key`, and like it, drops the doomed subtree
+  /// by unlinking its edge from the (copied) parent — never `make_mut`-ing the
+  /// subtree, so no *removed* value is cloned. `key` must be non-empty (the
+  /// empty-prefix whole-trie case is handled by [`Root`] dropping its root). The
+  /// same panic-safety contract holds — `len` is corrected atomically with the
+  /// (infallible) unlink, after the fallible make-mut/traversal and before the
+  /// (fallible, but label-MOVING and therefore user-panic-free) `normalize_child`
+  /// on the way up.
   ///
   /// [`unlink_descendants`]: Node::unlink_descendants
   pub(crate) fn unlink_prefix(
@@ -553,24 +557,14 @@ where
     key: &[C],
     len: &mut usize,
   ) -> usize {
+    // PRECONDITION: `key` is non-empty. The whole-trie (empty-prefix) case is
+    // handled by the `Root` wrapper dropping its root pointer, so we never
+    // `make_mut` a node we are about to clear — which would clone the very values
+    // being deleted (Codex finding). Here `make_mut` only copies ANCESTORS on the
+    // path to `key` (ordinary copy-on-write, shared by every mutator); the doomed
+    // subtree itself is dropped by unlinking its edge, never cloned.
     let node = SharedPointer::make_mut(node_ptr);
-
-    let Some(first) = key.first() else {
-      // `key` ends here: this whole node is the prefix root — drop its value and
-      // every descendant. Counting and clearing are infallible, so `len` is
-      // corrected atomically with the unlink. The parent prunes the now-empty edge
-      // (or, at the root, the empty node is the canonical empty trie).
-      let removed = usize::from(node.value.is_some())
-        + node
-          .children
-          .iter()
-          .map(|edge| edge.child.count())
-          .sum::<usize>();
-      *len -= removed;
-      node.value = None;
-      node.children.clear();
-      return removed;
-    };
+    let first = &key[0];
 
     let Ok(i) = node.child_index(first.borrow()) else {
       return 0;
@@ -578,19 +572,26 @@ where
     let shared = common_len::<C>(&node.children[i].label, key);
     let label_len = node.children[i].label.len();
 
-    if shared == label_len {
-      // Whole label consumed: recurse, then re-canonicalize this node (which may
-      // now have a pruned-empty or single-child child).
+    if shared == key.len() {
+      // `key` ends at or within this edge: the whole child subtree is at or below
+      // `key`. Unlink the edge from this already-copied parent — that drops the
+      // value at `key` and every descendant via the pointer, with NO `make_mut` on
+      // the doomed subtree, so none of the removed values is cloned. `count` is
+      // inclusive (node + descendants), so `len` is corrected atomically with the
+      // (infallible) removal. Checked before the descend case so a `key` ending
+      // exactly at the child node boundary unlinks here rather than recursing into
+      // (and copying) the target.
+      let removed = node.children[i].child.count();
+      *len -= removed;
+      node.children.remove(i);
+      removed
+    } else if shared == label_len {
+      // Whole label consumed and `key` continues: recurse, then re-canonicalize
+      // this node (which may now have a pruned-empty or single-child child).
       let removed = Node::unlink_prefix(&mut node.children[i].child, &key[shared..], len);
       if removed > 0 {
         normalize_child(node, i);
       }
-      removed
-    } else if shared == key.len() {
-      // `key` ends mid-edge: the whole child subtree is at or below `key`.
-      let removed = node.children[i].child.count();
-      *len -= removed;
-      node.children.remove(i);
       removed
     } else {
       // `key` diverges from this edge — nothing matches, no change.
@@ -852,8 +853,17 @@ where
   }
 
   /// Removes the value at `key` *and* every strict descendant (node-inclusive),
-  /// returning the number of values removed. Never clones a `V`.
+  /// returning the number of values removed. Clones no *removed* value — only the
+  /// copy-on-write path to `key` is duplicated, exactly like every other mutator.
   pub(crate) fn delete_prefix(&mut self, components: &[C]) -> usize {
+    if components.is_empty() {
+      // Whole-trie delete: drop the root pointer outright. No `make_mut`, so not
+      // even the root's own path is copied and no value is cloned.
+      let removed = self.len;
+      self.root = None;
+      self.len = 0;
+      return removed;
+    }
     // Read-only existence check: if nothing is stored at or below `key`, there is
     // nothing to remove, so skip the copy-on-write entirely (preserving structural
     // sharing) and leave `len` alone. The traversal is fallible (user comparisons)
@@ -869,7 +879,8 @@ where
       return 0;
     }
     // `unlink_prefix` counts and unlinks the whole subtree at `key`, correcting
-    // `len` atomically with the (infallible) unlink — and never cloning a `V`.
+    // `len` atomically with the (infallible) unlink — unlinking the edge rather than
+    // copying the doomed subtree, so no removed value is cloned.
     match self.root.as_mut() {
       Some(root) => Node::unlink_prefix(root, components, &mut self.len),
       None => 0,
@@ -898,8 +909,13 @@ where
       return out;
     }
     // Phase 2: the values are safely captured, so commit the structural change.
-    // `unlink_prefix` corrects `len` atomically with the (infallible) unlink.
-    if let Some(root) = self.root.as_mut() {
+    // `unlink_prefix` unlinks the doomed edge rather than copying the subtree, so it
+    // never re-clones the values phase 1 already captured.
+    if components.is_empty() {
+      // Whole-trie drain: drop the root pointer (no `make_mut`, no re-clone).
+      self.root = None;
+      self.len = 0;
+    } else if let Some(root) = self.root.as_mut() {
       Node::unlink_prefix(root, components, &mut self.len);
     }
     out
