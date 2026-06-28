@@ -952,3 +952,513 @@ fn split_panic_in_ord_keeps_subtree_and_len() {
   assert_eq!(t.count_values(), 1);
   drop(snap);
 }
+
+// ----- go-immutable-radix parity: min/max ---------------------------------
+
+#[test]
+fn min_max_on_empty() {
+  let t: Trie = Radix::new();
+  assert_eq!(t.minimum(), None);
+  assert_eq!(t.maximum(), None);
+}
+
+#[test]
+fn min_max_populated() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"abc"), 2);
+  t.insert(&bytes(b"abd"), 3);
+  t.insert(&bytes(b"b"), 4);
+  // "a" < "abc" < "abd" < "b" lexicographically.
+  assert_eq!(t.minimum(), Some((bytes(b"a"), &1)));
+  assert_eq!(t.maximum(), Some((bytes(b"b"), &4)));
+}
+
+#[test]
+fn min_max_with_empty_key_and_single() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b""), 9);
+  t.insert(&bytes(b"z"), 5);
+  // the empty key sorts before every other key
+  assert_eq!(t.minimum(), Some((bytes(b""), &9)));
+  assert_eq!(t.maximum(), Some((bytes(b"z"), &5)));
+
+  let mut one: Trie = Radix::new();
+  one.insert(&bytes(b"solo"), 7);
+  assert_eq!(one.minimum(), Some((bytes(b"solo"), &7)));
+  assert_eq!(one.maximum(), Some((bytes(b"solo"), &7)));
+}
+
+// ----- delete_prefix / drain_prefix (node-inclusive) ----------------------
+
+#[test]
+fn delete_prefix_is_node_inclusive() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"ab"), 2);
+  t.insert(&bytes(b"ac"), 3);
+  t.insert(&bytes(b"b"), 4);
+  // removes "a" AND its strict descendants ("ab", "ac")
+  assert_eq!(t.delete_prefix(b"a".as_slice()), 3);
+  assert_eq!(t.get(b"a".as_slice()), None);
+  assert_eq!(t.get(b"ab".as_slice()), None);
+  assert_eq!(t.get(b"ac".as_slice()), None);
+  assert_eq!(t.get(b"b".as_slice()), Some(&4));
+  assert_eq!(t.len(), 1);
+  assert!(t.is_canonical());
+}
+
+#[test]
+fn delete_prefix_vs_remove_descendants() {
+  // remove_descendants keeps the value at the key; delete_prefix removes it too.
+  let mut keep: Trie = Radix::new();
+  let mut nuke: Trie = Radix::new();
+  for t in [&mut keep, &mut nuke] {
+    t.insert(&bytes(b"x"), 1);
+    t.insert(&bytes(b"x/y"), 2);
+    t.insert(&bytes(b"x/y/z"), 3);
+  }
+  assert_eq!(keep.remove_descendants(b"x".as_slice()), 2); // x/y, x/y/z
+  assert_eq!(keep.get(b"x".as_slice()), Some(&1)); // kept
+  assert_eq!(keep.len(), 1);
+
+  assert_eq!(nuke.delete_prefix(b"x".as_slice()), 3); // x, x/y, x/y/z
+  assert_eq!(nuke.get(b"x".as_slice()), None); // removed
+  assert!(nuke.is_empty());
+}
+
+#[test]
+fn delete_prefix_mid_edge_absent_and_empty() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"abc"), 1);
+  t.insert(&bytes(b"abd"), 2);
+  // "ab" ends mid-edge (no node), yet is a prefix of both → removes both
+  assert_eq!(t.delete_prefix(b"ab".as_slice()), 2);
+  assert!(t.is_empty());
+
+  // absent prefix is a no-op
+  t.insert(&bytes(b"z"), 5);
+  assert_eq!(t.delete_prefix(b"q".as_slice()), 0);
+  assert_eq!(t.len(), 1);
+
+  // the empty key prefix clears the whole trie
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b""), 0);
+  assert_eq!(t.delete_prefix(b"".as_slice()), 3); // z, a, ""
+  assert!(t.is_empty());
+}
+
+#[test]
+fn delete_prefix_noop_preserves_sharing() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a/x"), 1);
+  t.insert(&bytes(b"b/y"), 2);
+  let snap = t.clone();
+  assert_eq!(t.delete_prefix(b"zzz".as_slice()), 0); // absent
+  for first in *b"ab" {
+    let s = snap.edge_child(&first).expect("edge");
+    let l = t.edge_child(&first).expect("edge");
+    assert!(
+      SharedPointer::ptr_eq(&s, &l),
+      "a no-op delete_prefix must not break sharing"
+    );
+  }
+}
+
+#[test]
+fn drain_prefix_returns_values_ascending() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"ab"), 2);
+  t.insert(&bytes(b"ac"), 3);
+  t.insert(&bytes(b"b"), 4);
+  // value at "a" first, then strict descendants in ascending key order
+  assert_eq!(t.drain_prefix(b"a".as_slice()), vec![1, 2, 3]);
+  assert_eq!(t.get(b"b".as_slice()), Some(&4));
+  assert_eq!(t.len(), 1);
+}
+
+#[test]
+fn drain_prefix_shared_subtree_clones_not_moves() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"a/b"), 2);
+  t.insert(&bytes(b"a/b/c"), 3);
+  let snap = t.clone();
+
+  assert_eq!(t.drain_prefix(b"a".as_slice()), vec![1, 2, 3]);
+  assert!(t.is_empty());
+  // snapshot keeps everything (values were cloned, not stolen)
+  assert_eq!(snap.get(b"a".as_slice()), Some(&1));
+  assert_eq!(snap.get(b"a/b".as_slice()), Some(&2));
+  assert_eq!(snap.get(b"a/b/c".as_slice()), Some(&3));
+  assert_eq!(snap.len(), 3);
+}
+
+// ----- reverse iteration --------------------------------------------------
+
+#[test]
+fn values_rev_is_reverse_of_values() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"ab"), 2);
+  t.insert(&bytes(b"abc"), 3);
+  t.insert(&bytes(b"b"), 4);
+  let fwd: Vec<u32> = t.values().copied().collect();
+  assert_eq!(fwd, vec![1, 2, 3, 4]); // a, ab, abc, b
+  let rev: Vec<u32> = t.values_rev().copied().collect();
+  assert_eq!(rev, vec![4, 3, 2, 1]);
+}
+
+#[test]
+fn descendants_rev_is_reverse_strict() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 0); // excluded (strict)
+  t.insert(&bytes(b"a/x"), 1);
+  t.insert(&bytes(b"a/y"), 2);
+  t.insert(&bytes(b"a/z"), 3);
+  let fwd: Vec<u32> = t.descendants(b"a".as_slice()).copied().collect();
+  assert_eq!(fwd, vec![1, 2, 3]);
+  let rev: Vec<u32> = t.descendants_rev(b"a".as_slice()).copied().collect();
+  assert_eq!(rev, vec![3, 2, 1]);
+}
+
+#[test]
+fn rev_iters_empty() {
+  let t: Trie = Radix::new();
+  assert_eq!(t.values_rev().count(), 0);
+  assert_eq!(t.descendants_rev(b"x".as_slice()).count(), 0);
+}
+
+// ----- range / seek_lower_bound -------------------------------------------
+
+use core::ops::Bound;
+
+fn rng(t: &Trie, lo: Bound<&[u8]>, hi: Bound<&[u8]>) -> Vec<(Vec<u8>, u32)> {
+  t.range::<[u8], _>((lo, hi)).map(|(k, v)| (k, *v)).collect()
+}
+
+#[test]
+fn range_all_bound_combinations() {
+  use core::ops::Bound::{Excluded, Included, Unbounded};
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"b"), 2);
+  t.insert(&bytes(b"c"), 3);
+  t.insert(&bytes(b"d"), 4);
+  let all = vec![
+    (bytes(b"a"), 1),
+    (bytes(b"b"), 2),
+    (bytes(b"c"), 3),
+    (bytes(b"d"), 4),
+  ];
+
+  // Unbounded × Unbounded → everything.
+  assert_eq!(rng(&t, Unbounded, Unbounded), all);
+  // start bounds, open end.
+  assert_eq!(
+    rng(&t, Included(b"b"), Unbounded),
+    vec![(bytes(b"b"), 2), (bytes(b"c"), 3), (bytes(b"d"), 4)]
+  );
+  assert_eq!(
+    rng(&t, Excluded(b"b"), Unbounded),
+    vec![(bytes(b"c"), 3), (bytes(b"d"), 4)]
+  );
+  // open start, end bounds.
+  assert_eq!(
+    rng(&t, Unbounded, Included(b"c")),
+    vec![(bytes(b"a"), 1), (bytes(b"b"), 2), (bytes(b"c"), 3)]
+  );
+  assert_eq!(
+    rng(&t, Unbounded, Excluded(b"c")),
+    vec![(bytes(b"a"), 1), (bytes(b"b"), 2)]
+  );
+  // both ends, every kind combination.
+  assert_eq!(
+    rng(&t, Included(b"b"), Included(b"c")),
+    vec![(bytes(b"b"), 2), (bytes(b"c"), 3)]
+  );
+  assert_eq!(
+    rng(&t, Included(b"b"), Excluded(b"c")),
+    vec![(bytes(b"b"), 2)]
+  );
+  assert_eq!(
+    rng(&t, Excluded(b"b"), Included(b"c")),
+    vec![(bytes(b"c"), 3)]
+  );
+  // nothing strictly between adjacent keys.
+  assert_eq!(rng(&t, Excluded(b"b"), Excluded(b"c")), vec![]);
+  // single element.
+  assert_eq!(
+    rng(&t, Included(b"b"), Included(b"b")),
+    vec![(bytes(b"b"), 2)]
+  );
+  // empty (degenerate) ranges.
+  assert_eq!(rng(&t, Included(b"c"), Excluded(b"c")), vec![]);
+  assert_eq!(rng(&t, Excluded(b"c"), Included(b"c")), vec![]);
+  // inverted bounds yield nothing rather than panicking.
+  assert_eq!(rng(&t, Included(b"d"), Included(b"a")), vec![]);
+  // spanning across the interior.
+  assert_eq!(
+    rng(&t, Excluded(b"a"), Excluded(b"d")),
+    vec![(bytes(b"b"), 2), (bytes(b"c"), 3)]
+  );
+}
+
+#[test]
+fn range_prefix_spanning() {
+  use core::ops::Bound::{Excluded, Included, Unbounded};
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"ab"), 2);
+  t.insert(&bytes(b"abc"), 3);
+  t.insert(&bytes(b"b"), 4);
+  // a proper prefix as a lower bound includes the whole subtree below it
+  assert_eq!(
+    rng(&t, Included(b"a"), Excluded(b"b")),
+    vec![(bytes(b"a"), 1), (bytes(b"ab"), 2), (bytes(b"abc"), 3)]
+  );
+  // excluding the prefix key keeps its descendants
+  assert_eq!(
+    rng(&t, Excluded(b"a"), Unbounded),
+    vec![(bytes(b"ab"), 2), (bytes(b"abc"), 3), (bytes(b"b"), 4)]
+  );
+  // a bound that diverges mid-edge below the edge includes the subtree
+  assert_eq!(
+    rng(&t, Included(b"aa"), Unbounded),
+    vec![(bytes(b"ab"), 2), (bytes(b"abc"), 3), (bytes(b"b"), 4)]
+  );
+  // a bound that diverges mid-edge above the edge excludes the subtree
+  assert_eq!(rng(&t, Included(b"ac"), Unbounded), vec![(bytes(b"b"), 4)]);
+}
+
+#[test]
+fn seek_lower_bound_positions() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"c"), 3);
+  t.insert(&bytes(b"e"), 5);
+  let seek = |k: &[u8]| -> Vec<u32> { t.seek_lower_bound(k).map(|(_, v)| *v).collect() };
+  // lands exactly on a stored key
+  assert_eq!(seek(b"c"), vec![3, 5]);
+  // lands between two keys
+  assert_eq!(seek(b"b"), vec![3, 5]);
+  // before all keys
+  assert_eq!(seek(b""), vec![1, 3, 5]);
+  assert_eq!(seek(b"a"), vec![1, 3, 5]);
+  // after all keys
+  assert_eq!(seek(b"f"), vec![]);
+  assert_eq!(seek(b"z"), vec![]);
+  // on the last key
+  assert_eq!(seek(b"e"), vec![5]);
+}
+
+// ----- proptest: ordered ops vs a BTreeMap oracle -------------------------
+
+fn model_range(
+  model: &BTreeMap<Vec<u8>, u32>,
+  lo: Bound<&[u8]>,
+  hi: Bound<&[u8]>,
+) -> Vec<(Vec<u8>, u32)> {
+  model
+    .iter()
+    .filter(|(k, _)| {
+      let k = k.as_slice();
+      let lo_ok = match lo {
+        Bound::Unbounded => true,
+        Bound::Included(b) => k >= b,
+        Bound::Excluded(b) => k > b,
+      };
+      let hi_ok = match hi {
+        Bound::Unbounded => true,
+        Bound::Included(b) => k <= b,
+        Bound::Excluded(b) => k < b,
+      };
+      lo_ok && hi_ok
+    })
+    .map(|(k, v)| (k.clone(), *v))
+    .collect()
+}
+
+fn model_delete_prefix(model: &mut BTreeMap<Vec<u8>, u32>, prefix: &[u8]) -> usize {
+  let victims: Vec<Vec<u8>> = model
+    .keys()
+    .filter(|k| k.starts_with(prefix))
+    .cloned()
+    .collect();
+  for k in &victims {
+    model.remove(k);
+  }
+  victims.len()
+}
+
+proptest! {
+  #[test]
+  fn ordered_ops_match_model(
+    entries in prop::collection::vec((key_strategy(), 0u32..1000), 0..40),
+    lo_k in key_strategy(),
+    hi_k in key_strategy(),
+    del in key_strategy(),
+  ) {
+    let mut trie: Trie = Radix::new();
+    let mut model: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
+    for (k, v) in entries {
+      trie.insert(&k.clone(), v);
+      model.insert(k, v);
+    }
+
+    // minimum / maximum.
+    prop_assert_eq!(
+      trie.minimum().map(|(k, v)| (k, *v)),
+      model.iter().next().map(|(k, v)| (k.clone(), *v))
+    );
+    prop_assert_eq!(
+      trie.maximum().map(|(k, v)| (k, *v)),
+      model.iter().next_back().map(|(k, v)| (k.clone(), *v))
+    );
+
+    // forward / reverse value order.
+    let fwd: Vec<u32> = trie.values().copied().collect();
+    let model_vals: Vec<u32> = model.values().copied().collect();
+    prop_assert_eq!(&fwd, &model_vals);
+    let rev: Vec<u32> = trie.values_rev().copied().collect();
+    let mut want_rev = model_vals.clone();
+    want_rev.reverse();
+    prop_assert_eq!(rev, want_rev);
+
+    // range over every bound-kind combination on two random pivots.
+    let los = [
+      Bound::Unbounded,
+      Bound::Included(lo_k.as_slice()),
+      Bound::Excluded(lo_k.as_slice()),
+    ];
+    let his = [
+      Bound::Unbounded,
+      Bound::Included(hi_k.as_slice()),
+      Bound::Excluded(hi_k.as_slice()),
+    ];
+    for &lo in &los {
+      for &hi in &his {
+        let got: Vec<(Vec<u8>, u32)> =
+          trie.range::<[u8], _>((lo, hi)).map(|(k, v)| (k, *v)).collect();
+        prop_assert_eq!(got, model_range(&model, lo, hi));
+      }
+    }
+
+    // seek_lower_bound == range(key..).
+    let seek: Vec<(Vec<u8>, u32)> = trie.seek_lower_bound(del.as_slice()).map(|(k, v)| (k, *v)).collect();
+    prop_assert_eq!(seek, model_range(&model, Bound::Included(del.as_slice()), Bound::Unbounded));
+
+    // strict descendants forward / reverse.
+    let d_fwd: Vec<u32> = trie.descendants(del.as_slice()).copied().collect();
+    let d_want: Vec<u32> = model
+      .iter()
+      .filter(|(k, _)| k.len() > del.len() && k.starts_with(&del))
+      .map(|(_, v)| *v)
+      .collect();
+    prop_assert_eq!(&d_fwd, &d_want);
+    let d_rev: Vec<u32> = trie.descendants_rev(del.as_slice()).copied().collect();
+    let mut d_rev_want = d_want.clone();
+    d_rev_want.reverse();
+    prop_assert_eq!(d_rev, d_rev_want);
+
+    // drain_prefix returns the at-or-below values in ascending key order, and is
+    // the value-returning twin of delete_prefix.
+    let drained = trie.drain_prefix(del.as_slice());
+    let mut model_after = model.clone();
+    let n = model_delete_prefix(&mut model_after, &del);
+    let want_drained: Vec<u32> = model
+      .iter()
+      .filter(|(k, _)| k.starts_with(&del))
+      .map(|(_, v)| *v)
+      .collect();
+    prop_assert_eq!(&drained, &want_drained);
+    prop_assert_eq!(drained.len(), n);
+
+    // delete_prefix removes the same set (count + resulting trie).
+    let removed = trie.delete_prefix(del.as_slice());
+    // drain already removed them, so a second delete is a no-op.
+    prop_assert_eq!(removed, 0);
+    model = model_after;
+    prop_assert_eq!(trie.len(), model.len());
+    prop_assert_eq!(trie.len(), trie.count_values());
+    prop_assert!(trie.is_canonical());
+    for (k, v) in &model {
+      prop_assert_eq!(trie.get(k.as_slice()), Some(v));
+    }
+  }
+}
+
+// ----- panic-safety: delete_prefix / drain_prefix --------------------------
+
+#[test]
+fn delete_prefix_panic_in_make_mut_before_unlink_keeps_len() {
+  // A shared trie forces copy-on-write: `make_mut` clones each node on the path
+  // (and thus its `KeyBomb` labels) before anything is unlinked. A panic there
+  // must leave `len` and every key exactly as they were.
+  let mut t: Radix<KeyBomb, u32> = Radix::new();
+  t.insert(&key(&[1]), 1);
+  t.insert(&key(&[1, 2]), 2);
+  t.insert(&key(&[1, 2, 3]), 3);
+  let snap = t.clone();
+  assert_eq!(t.len(), 3);
+
+  // Arm past the 1 key-materialization clone so the fuse fires inside make_mut.
+  KEY_FUSE.with(|c| c.set(Some(1)));
+  let r = catch_unwind(AssertUnwindSafe(|| t.delete_prefix(key(&[1]).as_slice())));
+  KEY_FUSE.with(|c| c.set(None));
+  assert!(r.is_err(), "the make_mut clone must have panicked");
+
+  assert_eq!(t.len(), 3);
+  assert_eq!(t.count_values(), 3);
+  assert_eq!(t.get(key(&[1]).as_slice()), Some(&1));
+  assert_eq!(t.get(key(&[1, 2]).as_slice()), Some(&2));
+  assert_eq!(t.get(key(&[1, 2, 3]).as_slice()), Some(&3));
+  drop(snap);
+}
+
+#[test]
+fn drain_prefix_panic_in_make_mut_before_unlink_keeps_len() {
+  let mut t: Radix<KeyBomb, u32> = Radix::new();
+  t.insert(&key(&[1]), 1);
+  t.insert(&key(&[1, 2]), 2);
+  t.insert(&key(&[1, 2, 3]), 3);
+  let snap = t.clone();
+  assert_eq!(t.len(), 3);
+
+  // The values clone first (Phase 1, fine for `u32`); the panic is in Phase 2's
+  // make_mut, before anything is unlinked.
+  KEY_FUSE.with(|c| c.set(Some(1)));
+  let r = catch_unwind(AssertUnwindSafe(|| t.drain_prefix(key(&[1]).as_slice())));
+  KEY_FUSE.with(|c| c.set(None));
+  assert!(r.is_err(), "the make_mut clone must have panicked");
+
+  assert_eq!(t.len(), 3);
+  assert_eq!(t.count_values(), 3);
+  assert_eq!(t.get(key(&[1]).as_slice()), Some(&1));
+  assert_eq!(t.get(key(&[1, 2, 3]).as_slice()), Some(&3));
+  drop(snap);
+}
+
+#[test]
+fn drain_prefix_panic_in_value_clone_keeps_trie_intact() {
+  // drain_prefix clones the value at the key and every descendant value out FIRST
+  // (Phase 1); a panic there must leave the trie and `len` completely untouched.
+  let mut t: Radix<KeyBomb, ValBomb> = Radix::new();
+  t.insert(&key(&[1]), ValBomb(1));
+  t.insert(&key(&[1, 2]), ValBomb(2));
+  t.insert(&key(&[1, 2, 3]), ValBomb(3));
+  assert_eq!(t.len(), 3);
+
+  // Phase 1 clones value-at-key (1) then descendants (2, 3); fire on the 2nd.
+  VAL_FUSE.with(|c| c.set(Some(1)));
+  let r = catch_unwind(AssertUnwindSafe(|| t.drain_prefix(key(&[1]).as_slice())));
+  VAL_FUSE.with(|c| c.set(None));
+  assert!(r.is_err(), "the armed value clone must have panicked");
+
+  assert_eq!(t.get(key(&[1]).as_slice()), Some(&ValBomb(1)));
+  assert_eq!(t.get(key(&[1, 2]).as_slice()), Some(&ValBomb(2)));
+  assert_eq!(t.get(key(&[1, 2, 3]).as_slice()), Some(&ValBomb(3)));
+  assert_eq!(t.len(), 3);
+  assert_eq!(t.count_values(), 3);
+}

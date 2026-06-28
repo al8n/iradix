@@ -214,3 +214,219 @@ proptest! {
     }
   }
 }
+
+// ----- go-immutable-radix parity (Arc face) -------------------------------
+
+use core::ops::Bound;
+
+#[test]
+fn min_max_empty_and_populated() {
+  let empty: Trie = Radix::new();
+  assert_eq!(empty.minimum(), None);
+  assert_eq!(empty.maximum(), None);
+
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"abc"), 2);
+  t.insert(&bytes(b"abd"), 3);
+  t.insert(&bytes(b"b"), 4);
+  assert_eq!(t.minimum(), Some((bytes(b"a"), &1)));
+  assert_eq!(t.maximum(), Some((bytes(b"b"), &4)));
+}
+
+#[test]
+fn delete_prefix_is_node_inclusive_and_vs_remove_descendants() {
+  let mut keep: Trie = Radix::new();
+  let mut nuke: Trie = Radix::new();
+  for t in [&mut keep, &mut nuke] {
+    t.insert(&bytes(b"x"), 1);
+    t.insert(&bytes(b"x/y"), 2);
+    t.insert(&bytes(b"x/y/z"), 3);
+    t.insert(&bytes(b"y"), 9);
+  }
+  assert_eq!(keep.remove_descendants(b"x".as_slice()), 2);
+  assert_eq!(keep.get(b"x".as_slice()), Some(&1)); // kept
+  assert_eq!(keep.len(), 2);
+  assert!(keep.is_canonical());
+
+  assert_eq!(nuke.delete_prefix(b"x".as_slice()), 3);
+  assert_eq!(nuke.get(b"x".as_slice()), None); // removed
+  assert_eq!(nuke.get(b"y".as_slice()), Some(&9));
+  assert_eq!(nuke.len(), 1);
+  assert!(nuke.is_canonical());
+}
+
+#[test]
+fn drain_prefix_ascending_and_shared_clones() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"a/b"), 2);
+  t.insert(&bytes(b"a/c"), 3);
+  let snap = t.clone();
+  // value at key first, then strict descendants ascending
+  assert_eq!(t.drain_prefix(b"a".as_slice()), vec![1, 2, 3]);
+  assert!(t.is_empty());
+  // snapshot intact (values cloned, not stolen)
+  assert_eq!(snap.get(b"a".as_slice()), Some(&1));
+  assert_eq!(snap.get(b"a/b".as_slice()), Some(&2));
+  assert_eq!(snap.get(b"a/c".as_slice()), Some(&3));
+  assert_eq!(snap.len(), 3);
+}
+
+#[test]
+fn reverse_iteration() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"ab"), 2);
+  t.insert(&bytes(b"abc"), 3);
+  t.insert(&bytes(b"b"), 4);
+  let rev: Vec<u32> = t.values_rev().copied().collect();
+  assert_eq!(rev, vec![4, 3, 2, 1]);
+  let drev: Vec<u32> = t.descendants_rev(b"a".as_slice()).copied().collect();
+  assert_eq!(drev, vec![3, 2]); // strict descendants ab, abc descending
+}
+
+fn rng(t: &Trie, lo: Bound<&[u8]>, hi: Bound<&[u8]>) -> Vec<(Vec<u8>, u32)> {
+  t.range::<[u8], _>((lo, hi)).map(|(k, v)| (k, *v)).collect()
+}
+
+#[test]
+fn range_bound_combinations_and_seek() {
+  use core::ops::Bound::{Excluded, Included, Unbounded};
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"b"), 2);
+  t.insert(&bytes(b"c"), 3);
+  t.insert(&bytes(b"d"), 4);
+
+  assert_eq!(rng(&t, Unbounded, Unbounded).len(), 4);
+  assert_eq!(
+    rng(&t, Included(b"b"), Excluded(b"d")),
+    vec![(bytes(b"b"), 2), (bytes(b"c"), 3)]
+  );
+  assert_eq!(
+    rng(&t, Excluded(b"b"), Included(b"c")),
+    vec![(bytes(b"c"), 3)]
+  );
+  assert_eq!(rng(&t, Excluded(b"b"), Excluded(b"c")), vec![]);
+  assert_eq!(
+    rng(&t, Included(b"c"), Included(b"c")),
+    vec![(bytes(b"c"), 3)]
+  );
+  // inverted bounds → empty, no panic
+  assert_eq!(rng(&t, Included(b"d"), Included(b"a")), vec![]);
+
+  let seek = |k: &[u8]| -> Vec<u32> { t.seek_lower_bound(k).map(|(_, v)| *v).collect() };
+  assert_eq!(seek(b""), vec![1, 2, 3, 4]); // before all
+  assert_eq!(seek(b"b"), vec![2, 3, 4]); // exact
+  assert_eq!(seek(b"bb"), vec![3, 4]); // between
+  assert_eq!(seek(b"z"), vec![]); // after all
+}
+
+fn model_range(
+  model: &BTreeMap<Vec<u8>, u32>,
+  lo: Bound<&[u8]>,
+  hi: Bound<&[u8]>,
+) -> Vec<(Vec<u8>, u32)> {
+  model
+    .iter()
+    .filter(|(k, _)| {
+      let k = k.as_slice();
+      let lo_ok = match lo {
+        Bound::Unbounded => true,
+        Bound::Included(b) => k >= b,
+        Bound::Excluded(b) => k > b,
+      };
+      let hi_ok = match hi {
+        Bound::Unbounded => true,
+        Bound::Included(b) => k <= b,
+        Bound::Excluded(b) => k < b,
+      };
+      lo_ok && hi_ok
+    })
+    .map(|(k, v)| (k.clone(), *v))
+    .collect()
+}
+
+fn model_delete_prefix(model: &mut BTreeMap<Vec<u8>, u32>, prefix: &[u8]) -> usize {
+  let victims: Vec<Vec<u8>> = model
+    .keys()
+    .filter(|k| k.starts_with(prefix))
+    .cloned()
+    .collect();
+  for k in &victims {
+    model.remove(k);
+  }
+  victims.len()
+}
+
+proptest! {
+  #[test]
+  fn ordered_ops_match_model(
+    entries in prop::collection::vec((key_strategy(), 0u32..1000), 0..40),
+    lo_k in key_strategy(),
+    hi_k in key_strategy(),
+    del in key_strategy(),
+  ) {
+    let mut trie: Trie = Radix::new();
+    let mut model: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
+    for (k, v) in entries {
+      trie.insert(&k.clone(), v);
+      model.insert(k, v);
+    }
+
+    prop_assert_eq!(
+      trie.minimum().map(|(k, v)| (k, *v)),
+      model.iter().next().map(|(k, v)| (k.clone(), *v))
+    );
+    prop_assert_eq!(
+      trie.maximum().map(|(k, v)| (k, *v)),
+      model.iter().next_back().map(|(k, v)| (k.clone(), *v))
+    );
+
+    let model_vals: Vec<u32> = model.values().copied().collect();
+    let rev: Vec<u32> = trie.values_rev().copied().collect();
+    let mut want_rev = model_vals.clone();
+    want_rev.reverse();
+    prop_assert_eq!(rev, want_rev);
+
+    let los = [
+      Bound::Unbounded,
+      Bound::Included(lo_k.as_slice()),
+      Bound::Excluded(lo_k.as_slice()),
+    ];
+    let his = [
+      Bound::Unbounded,
+      Bound::Included(hi_k.as_slice()),
+      Bound::Excluded(hi_k.as_slice()),
+    ];
+    for &lo in &los {
+      for &hi in &his {
+        let got: Vec<(Vec<u8>, u32)> =
+          trie.range::<[u8], _>((lo, hi)).map(|(k, v)| (k, *v)).collect();
+        prop_assert_eq!(got, model_range(&model, lo, hi));
+      }
+    }
+
+    let seek: Vec<(Vec<u8>, u32)> =
+      trie.seek_lower_bound(del.as_slice()).map(|(k, v)| (k, *v)).collect();
+    prop_assert_eq!(seek, model_range(&model, Bound::Included(del.as_slice()), Bound::Unbounded));
+
+    // delete_prefix removes the at-or-below set; drain_prefix returns it ascending.
+    let drained = trie.drain_prefix(del.as_slice());
+    let want_drained: Vec<u32> = model
+      .iter()
+      .filter(|(k, _)| k.starts_with(&del))
+      .map(|(_, v)| *v)
+      .collect();
+    prop_assert_eq!(&drained, &want_drained);
+    let removed = model_delete_prefix(&mut model, &del);
+    prop_assert_eq!(drained.len(), removed);
+    prop_assert_eq!(trie.len(), model.len());
+    prop_assert_eq!(trie.len(), trie.count_values());
+    prop_assert!(trie.is_canonical());
+    for (k, v) in &model {
+      prop_assert_eq!(trie.get(k.as_slice()), Some(v));
+    }
+  }
+}

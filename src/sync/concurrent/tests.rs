@@ -132,6 +132,46 @@ fn panic_mid_build_publishes_nothing() {
 }
 
 #[test]
+fn txn_forwards_ordered_ops() {
+  let holder: Conc = ConcurrentRadix::new();
+  let mut txn = holder.txn();
+  txn.insert(b"a".as_slice(), 1);
+  txn.insert(b"a/b".as_slice(), 2);
+  txn.insert(b"a/c".as_slice(), 3);
+  txn.insert(b"d".as_slice(), 4);
+
+  // ordered reads on the working copy
+  assert_eq!(txn.minimum(), Some((b"a".to_vec(), &1)));
+  assert_eq!(txn.maximum(), Some((b"d".to_vec(), &4)));
+  let rev: std::vec::Vec<u32> = txn.values_rev().copied().collect();
+  assert_eq!(rev, std::vec![4, 3, 2, 1]);
+  let seek: std::vec::Vec<u32> = txn
+    .seek_lower_bound(b"a/b".as_slice())
+    .map(|(_, v)| *v)
+    .collect();
+  assert_eq!(seek, std::vec![2, 3, 4]);
+  let ranged: std::vec::Vec<u32> = txn
+    .range::<[u8], _>((
+      core::ops::Bound::Included(b"a".as_slice()),
+      core::ops::Bound::Excluded(b"d".as_slice()),
+    ))
+    .map(|(_, v)| *v)
+    .collect();
+  assert_eq!(ranged, std::vec![1, 2, 3]);
+
+  // node-inclusive prefix removal on the working copy
+  assert_eq!(txn.drain_prefix(b"a".as_slice()), std::vec![1, 2, 3]);
+  txn.insert(b"a".as_slice(), 5);
+  assert_eq!(txn.delete_prefix(b"a".as_slice()), 1);
+  txn.commit().unwrap();
+
+  let snap = holder.load();
+  assert_eq!(snap.get(b"a".as_slice()), None);
+  assert_eq!(snap.get(b"d".as_slice()), Some(&4));
+  assert_eq!(snap.len(), 1);
+}
+
+#[test]
 fn from_radix_seeds_holder() {
   let mut seed: Radix<u8, u32> = Radix::new();
   seed.insert(&b"seed".to_vec(), 42);

@@ -2,6 +2,34 @@
 
 ## UNRELEASED
 
+### Added — go-immutable-radix parity
+
+Ordered operations on both `unsync::Radix` and `sync::Radix` (and forwarded
+through the concurrent `Txn`). Ordered queries return reconstructed keys as
+`Vec<C::Owned>`; value-only iterators stay decompose-only and `V`-bound-free.
+
+- `minimum` / `maximum`: the smallest / largest key (component lexicographic
+  order) and its value.
+- `delete_prefix`: removes the value at the key **and** every strict descendant
+  (node-inclusive; go's `DeletePrefix`), returning the count. Contrast the
+  existing strict-only `remove_descendants`, which keeps the value at the key.
+- `drain_prefix`: same node-inclusive removal, returning the removed values in
+  ascending key order (the value at the key, if any, first).
+- `values_rev`: every value in reverse key order (mirror of `values`).
+- `descendants_rev`: a key's strict descendants in reverse key order (mirror of
+  `descendants`).
+- `range`: every `(key, value)` whose key lies within a `RangeBounds`, ascending,
+  honoring every `Included` / `Excluded` / `Unbounded` combination on both ends.
+- `seek_lower_bound`: a forward cursor at the first entry with key `>= key`, then
+  ascending (go's `SeekLowerBound`).
+
+### Fixed
+
+- `descendants` now yields values in ascending key order across all child
+  subtrees (previously the largest child subtree came first), matching its
+  documented "key order" contract. `drain_descendants` consequently returns
+  ascending too.
+
 ## 0.1.0
 
 Initial release.

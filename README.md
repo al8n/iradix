@@ -37,7 +37,12 @@ dependency on any of it: it is a plain, reusable container.
   first component and located by binary search — no hashing.
 - **Prefix queries.** Inclusive [`get_ancestor`] (longest covered prefix),
   [`strict_ancestor`], `ancestors`, `descendants`, and bulk `remove_descendants`
-  / `drain_descendants`.
+  / `drain_descendants` (strict) or `delete_prefix` / `drain_prefix`
+  (node-inclusive).
+- **Ordered queries.** `minimum` / `maximum`, forward and reverse value iteration
+  (`values` / `values_rev`, `descendants` / `descendants_rev`), and key-ordered
+  `range` (any `RangeBounds`) / `seek_lower_bound` cursors that yield reconstructed
+  `(key, value)` pairs.
 - **Lock-free concurrent holder.** [`sync::ConcurrentRadix`] wraps a shared trie
   with wait-free snapshot reads and compare-and-swap transactional writes (build
   a private working copy, then `commit` — retry on conflict).
@@ -77,6 +82,39 @@ assert_eq!(trie.get_ancestor(b"/a/b".as_slice()), Some(&"ab"));
 
 // strict_ancestor excludes the exact key.
 assert_eq!(trie.strict_ancestor(b"/a/b".as_slice()), Some(&"a"));
+```
+
+### Ordered queries: min/max, ranges, and a lower-bound cursor
+
+```rust
+use iradix::unsync::Radix;
+
+let mut trie: Radix<u8, u32> = Radix::new();
+for (k, v) in [
+    (b"a".as_slice(), 1),
+    (b"ab".as_slice(), 2),
+    (b"b".as_slice(), 3),
+    (b"c".as_slice(), 4),
+] {
+    trie.insert(k, v);
+}
+
+assert_eq!(trie.minimum(), Some((b"a".to_vec(), &1)));
+assert_eq!(trie.maximum(), Some((b"c".to_vec(), &4)));
+
+// `range` yields reconstructed (key, value) pairs in ascending key order.
+let got: Vec<(Vec<u8>, u32)> = trie
+    .range::<[u8], _>((core::ops::Bound::Included(b"ab".as_slice()), core::ops::Bound::Included(b"b".as_slice())))
+    .map(|(k, v)| (k, *v))
+    .collect();
+assert_eq!(got, vec![(b"ab".to_vec(), 2), (b"b".to_vec(), 3)]);
+
+// `seek_lower_bound` is a forward cursor at the first key >= the argument.
+let from_b: Vec<u32> = trie.seek_lower_bound(b"b".as_slice()).map(|(_, v)| *v).collect();
+assert_eq!(from_b, vec![3, 4]);
+
+// `delete_prefix` removes the key and every descendant (node-inclusive).
+assert_eq!(trie.delete_prefix(b"a".as_slice()), 2); // "a" and "ab"
 ```
 
 ### Snapshots are O(1) and isolated

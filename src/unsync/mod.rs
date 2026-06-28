@@ -7,13 +7,16 @@
 
 use std::{borrow::ToOwned, vec::Vec};
 
-use core::borrow::Borrow;
+use core::{
+  borrow::Borrow,
+  ops::{Bound, RangeBounds},
+};
 
 use archery::RcK;
 
 use crate::{
   RadixKey,
-  node::{Root, SliceIter, ValueIter},
+  node::{RangeIter, RevValueIter, Root, SliceIter, ValueIter},
 };
 
 /// A generic, persistent (copy-on-write) radix trie, confined to one thread.
@@ -183,6 +186,78 @@ where
       inner: self.inner.descendants(key.components()),
     }
   }
+
+  /// Returns the smallest key (component lexicographic order) and its value, or
+  /// `None` if the trie is empty.
+  #[inline]
+  pub fn minimum(&self) -> Option<(Vec<C::Owned>, &V)> {
+    self.inner.minimum()
+  }
+
+  /// Returns the largest key (component lexicographic order) and its value, or
+  /// `None` if the trie is empty.
+  #[inline]
+  pub fn maximum(&self) -> Option<(Vec<C::Owned>, &V)> {
+    self.inner.maximum()
+  }
+
+  /// Iterates references to every value in the trie, in **reverse** key order
+  /// (the mirror of [`values`](Radix::values)).
+  #[inline]
+  #[must_use]
+  pub fn values_rev(&self) -> RevValues<'_, C, V> {
+    RevValues {
+      inner: self.inner.values_rev(),
+    }
+  }
+
+  /// Iterates references to the values of every *strict* descendant of `key`, in
+  /// **reverse** key order (the mirror of [`descendants`](Radix::descendants)).
+  #[inline]
+  #[must_use]
+  pub fn descendants_rev<K>(&self, key: &K) -> RevDescendants<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    RevDescendants {
+      inner: self.inner.descendants_rev(key.components()),
+    }
+  }
+
+  /// Iterates `(key, value)` for every entry whose key lies within `range`, in
+  /// ascending key order, reconstructing each key as a `Vec` of its components.
+  ///
+  /// Every [`Bound`] combination is honored on both ends:
+  /// `Included`/`Excluded`/`Unbounded`.
+  #[inline]
+  #[must_use]
+  pub fn range<K, R>(&self, range: R) -> Range<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    R: RangeBounds<K>,
+  {
+    Range {
+      inner: self.inner.range(
+        materialize_bound(range.start_bound()),
+        materialize_bound(range.end_bound()),
+      ),
+    }
+  }
+
+  /// Returns a forward cursor positioned at the first entry whose key is `>= key`,
+  /// then ascending (go-immutable-radix's `SeekLowerBound`). Equivalent to
+  /// [`range(key..)`](Radix::range), exposed under its own name for parity.
+  #[inline]
+  #[must_use]
+  pub fn seek_lower_bound<K>(&self, key: &K) -> Range<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    let lower: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    Range {
+      inner: self.inner.range(Bound::Included(lower), Bound::Unbounded),
+    }
+  }
 }
 
 // ----- mutators (C: Ord, C::Owned: Clone, V: Clone) -----------------------
@@ -229,6 +304,30 @@ where
   {
     let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
     self.inner.drain_descendants(&components)
+  }
+
+  /// Removes the value at `key` **and** every strict descendant (node-inclusive;
+  /// go-immutable-radix's `DeletePrefix`), returning the number of values removed.
+  ///
+  /// Contrast [`remove_descendants`](Radix::remove_descendants), which keeps the
+  /// value stored at `key` itself. Never clones a `V`.
+  pub fn delete_prefix<K>(&mut self, key: &K) -> usize
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    self.inner.delete_prefix(&components)
+  }
+
+  /// Removes the value at `key` **and** every strict descendant (node-inclusive)
+  /// and returns their values in ascending key order (the value at `key` itself,
+  /// if any, first). Clones values out before unlinking.
+  pub fn drain_prefix<K>(&mut self, key: &K) -> Vec<V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    let components: Vec<C::Owned> = key.components().map(|c| c.borrow().to_owned()).collect();
+    self.inner.drain_prefix(&components)
   }
 }
 
@@ -291,6 +390,87 @@ where
   #[inline]
   fn next(&mut self) -> Option<Self::Item> {
     self.inner.next()
+  }
+}
+
+/// Iterator over references to every value in a [`Radix`], in reverse key order.
+///
+/// Created by [`Radix::values_rev`].
+pub struct RevValues<'a, C, V>
+where
+  C: ?Sized + ToOwned,
+{
+  inner: RevValueIter<'a, RcK, C, V>,
+}
+
+impl<'a, C, V> Iterator for RevValues<'a, C, V>
+where
+  C: ?Sized + ToOwned,
+{
+  type Item = &'a V;
+
+  #[inline]
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next()
+  }
+}
+
+/// Iterator over references to `key`'s strict descendants, in reverse key order.
+///
+/// Created by [`Radix::descendants_rev`].
+pub struct RevDescendants<'a, C, V>
+where
+  C: ?Sized + ToOwned,
+{
+  inner: RevValueIter<'a, RcK, C, V>,
+}
+
+impl<'a, C, V> Iterator for RevDescendants<'a, C, V>
+where
+  C: ?Sized + ToOwned,
+{
+  type Item = &'a V;
+
+  #[inline]
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next()
+  }
+}
+
+/// Iterator over `(key, value)` entries within a range, in ascending key order.
+///
+/// Each item's key is reconstructed as a `Vec` of its components. Created by
+/// [`Radix::range`] and [`Radix::seek_lower_bound`].
+pub struct Range<'a, C, V>
+where
+  C: ?Sized + ToOwned,
+{
+  inner: RangeIter<'a, RcK, C, V>,
+}
+
+impl<'a, C, V> Iterator for Range<'a, C, V>
+where
+  C: ?Sized + ToOwned + Ord,
+{
+  type Item = (Vec<C::Owned>, &'a V);
+
+  #[inline]
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next()
+  }
+}
+
+/// Re-owns a `RangeBounds` endpoint into a `Bound` of materialized components for
+/// the internal range cursor.
+fn materialize_bound<C, K>(bound: Bound<&K>) -> Bound<Vec<C::Owned>>
+where
+  C: ?Sized + ToOwned,
+  K: RadixKey<Component = C> + ?Sized,
+{
+  match bound {
+    Bound::Included(k) => Bound::Included(k.components().map(|c| c.borrow().to_owned()).collect()),
+    Bound::Excluded(k) => Bound::Excluded(k.components().map(|c| c.borrow().to_owned()).collect()),
+    Bound::Unbounded => Bound::Unbounded,
   }
 }
 
