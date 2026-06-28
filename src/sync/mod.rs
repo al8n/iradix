@@ -2,7 +2,7 @@
 //!
 //! [`Radix`] is an **immutable, persistent** trie that fixes the internal pointer
 //! kind to [`Arc`](std::sync::Arc): a value is a cheap, shareable snapshot that is
-//! `Send + Sync` exactly when `V: Send + Sync` (both are *auto-derived* — the crate
+//! `Send + Sync` exactly when both `C` and `V` are (both are *auto-derived* — the crate
 //! declares no explicit `unsafe impl Send`/`Sync` anywhere). Every mutation returns
 //! a *new* tree; the original is never observed to change.
 //!
@@ -43,7 +43,7 @@ use crate::{
 /// Keys decompose into [`Component`](RadixKey::Component)s via [`RadixKey`]; the
 /// trie is parameterized over the component type `C` and the value type `V`, and
 /// uses [`Arc`](std::sync::Arc) pointers internally. It is `Send + Sync` whenever
-/// `V` is (auto-derived; the crate declares no explicit `unsafe impl`).
+/// both `C` and `V` are (auto-derived; the crate declares no explicit `unsafe impl`).
 ///
 /// A `Radix` never mutates in place. A [`clone`](Clone::clone) is O(1) and shares
 /// all structure with the original; each one-op mutator returns a *new* tree that
@@ -138,6 +138,7 @@ impl<C, V> Radix<C, V> {
   /// tree is unaffected by anything the transaction does (and dropping the
   /// transaction without committing discards its edits).
   #[inline]
+  #[must_use = "a Txn is an owned working copy with no effect until commit"]
   pub fn txn(&self) -> Txn<C, V> {
     Txn {
       working: self.inner.clone(),
@@ -147,6 +148,7 @@ impl<C, V> Radix<C, V> {
   /// Returns an empty tree. (Provided for symmetry with the other one-op
   /// mutators; equivalent to [`Radix::new`].)
   #[inline]
+  #[must_use = "returns a new empty tree; sync::Radix is immutable"]
   pub fn clear(&self) -> Self {
     Self::new()
   }
@@ -328,6 +330,7 @@ where
   ///
   /// A one-shot [`txn`](Radix::txn) → mutate → [`commit`](Txn::commit); to apply
   /// several edits, open a [`Txn`] yourself.
+  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
   pub fn insert<K>(&self, key: &K, value: V) -> (Self, Option<V>)
   where
     K: RadixKey<Component = C> + ?Sized,
@@ -339,6 +342,7 @@ where
 
   /// Returns the tree with the value at exactly `key` removed, alongside that value
   /// if it was present. The original tree is unchanged.
+  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
   pub fn remove<K>(&self, key: &K) -> (Self, Option<V>)
   where
     K: RadixKey<Component = C> + ?Sized,
@@ -351,6 +355,7 @@ where
   /// Returns the tree with every *strict* descendant of `key` removed (the value at
   /// `key`, if any, is kept), alongside the number removed. The original tree is
   /// unchanged.
+  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
   pub fn remove_descendants<K>(&self, key: &K) -> (Self, usize)
   where
     K: RadixKey<Component = C> + ?Sized,
@@ -363,6 +368,7 @@ where
   /// Returns the tree with every *strict* descendant of `key` removed (the value at
   /// `key`, if any, is kept), alongside the removed values. The original tree is
   /// unchanged.
+  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
   pub fn drain_descendants<K>(&self, key: &K) -> (Self, Vec<V>)
   where
     K: RadixKey<Component = C> + ?Sized,
@@ -378,6 +384,7 @@ where
   ///
   /// Contrast [`remove_descendants`](Radix::remove_descendants), which keeps the
   /// value stored at `key` itself.
+  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
   pub fn delete_prefix<K>(&self, key: &K) -> (Self, usize)
   where
     K: RadixKey<Component = C> + ?Sized,
@@ -390,6 +397,7 @@ where
   /// Returns the tree with the value at `key` **and** every strict descendant
   /// removed (node-inclusive), alongside the removed values in ascending key order
   /// (the value at `key` itself, if any, first). The original tree is unchanged.
+  #[must_use = "returns the updated tree; sync::Radix is immutable, so the original is left unchanged"]
   pub fn drain_prefix<K>(&self, key: &K) -> (Self, Vec<V>)
   where
     K: RadixKey<Component = C> + ?Sized,
@@ -471,6 +479,7 @@ impl<C, V> Txn<C, V> {
   /// Consumes the transaction and returns the next immutable [`Radix`] holding all
   /// committed edits.
   #[inline]
+  #[must_use = "returns the new tree holding the committed edits"]
   pub fn commit(self) -> Radix<C, V> {
     Radix {
       inner: self.working,
