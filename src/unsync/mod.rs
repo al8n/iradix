@@ -3,7 +3,7 @@
 //! [`Radix`] fixes the internal pointer kind to [`Rc`](std::rc::Rc): clones are
 //! cheap, refcounts are non-atomic, and the trie is confined to one thread. It is
 //! the right choice when no snapshot ever crosses a thread boundary. For a
-//! cross-thread snapshot or a shared concurrent holder, use [`crate::sync`].
+//! cross-thread snapshot, use [`crate::sync`].
 
 use std::{borrow::ToOwned, vec::Vec};
 
@@ -30,10 +30,8 @@ use crate::{
 /// from the root to the touched node, leaving every untouched subtree physically
 /// shared with prior versions. This makes snapshots free and isolation automatic.
 ///
-/// Single-threaded code needs no transaction type: there is no concurrent
-/// observer and no atomic publish point, so a batch of edits is simply a sequence
-/// of direct `&mut self` calls; `.clone()` before the batch keeps the prior
-/// snapshot.
+/// A batch of edits is simply a sequence of direct `&mut self` calls; `.clone()`
+/// before the batch keeps the prior snapshot fully isolated.
 ///
 /// # Bounds
 ///

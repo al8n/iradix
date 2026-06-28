@@ -3,8 +3,7 @@
 //! [`Radix`] fixes the internal pointer kind to [`Arc`](std::sync::Arc), so a
 //! snapshot is a cheap, shareable, immutable value that is `Send + Sync` exactly
 //! when `V: Send + Sync` (both are *auto-derived* — the crate declares no explicit
-//! `unsafe impl Send`/`Sync` anywhere). [`ConcurrentRadix`] wraps a shared [`Radix`]
-//! for lock-free snapshot reads and compare-and-swap transactional writes.
+//! `unsafe impl Send`/`Sync` anywhere).
 //!
 //! For a single-threaded trie that never shares a snapshot across threads, prefer
 //! the cheaper non-atomic [`crate::unsync`] face.
@@ -23,12 +22,6 @@ use crate::{
   node::{RangeIter, RevValueIter, Root, SliceIter, ValueIter},
 };
 
-#[cfg(any(feature = "std", feature = "alloc"))]
-mod concurrent;
-
-#[cfg(any(feature = "std", feature = "alloc"))]
-pub use concurrent::{ConcurrentRadix, Conflict, Txn};
-
 /// A generic, persistent (copy-on-write) radix trie, shareable across threads.
 ///
 /// Keys decompose into [`Component`](RadixKey::Component)s via [`RadixKey`]; the
@@ -42,8 +35,9 @@ pub use concurrent::{ConcurrentRadix, Conflict, Txn};
 /// shared with prior versions. This makes snapshots free and isolation automatic.
 ///
 /// The direct `&mut self` mutators here yield the next persistent version in
-/// place; to publish versions atomically to concurrent readers, hold the trie in
-/// a [`ConcurrentRadix`].
+/// place. `iradix` ships no built-in concurrent holder: to publish versions
+/// atomically to shared readers, hold the snapshot yourself — wrap it in an
+/// `arc_swap::ArcSwap<Radix<…>>` or a `Mutex`, then clone, mutate, and store back.
 ///
 /// # Bounds
 ///
