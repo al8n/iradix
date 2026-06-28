@@ -75,83 +75,21 @@ For `no_std` (heap required):
 iradix = { version = "0.1", default-features = false, features = ["alloc"] }
 ```
 
-## Usage
+## Examples
 
-### Insert, look up, and find the longest covering prefix
+Runnable, self-contained examples live in [`examples/`](examples/):
 
-```rust
-use iradix::unsync::Radix;
+| example | what it shows |
+|---|---|
+| [`unsync`](examples/unsync.rs) | `unsync::Radix` — exact lookup; longest-covered-prefix queries (`get_ancestor` / `strict_ancestor`); ordered queries (`minimum` / `maximum` / `range` / `seek_lower_bound`); node-inclusive prefix removal; and `O(1)` snapshot isolation. |
+| [`sync`](examples/sync.rs) | `sync::Radix` — lock-free concurrent reads (`Send + Sync`); snapshot isolation across a write; and the clone-mutate-publish pattern with a shared `Arc<Mutex<…>>` holder. |
 
-let mut trie: Radix<u8, &str> = Radix::new();
-trie.insert(b"/a".as_slice(), "a");
-trie.insert(b"/a/b".as_slice(), "ab");
+Run them with:
 
-assert_eq!(trie.get(b"/a/b".as_slice()), Some(&"ab"));
-assert!(trie.contains(b"/a".as_slice()));
-
-// get_ancestor is inclusive: an exact match counts as its own ancestor.
-assert_eq!(trie.get_ancestor(b"/a/b/c".as_slice()), Some(&"ab"));
-assert_eq!(trie.get_ancestor(b"/a/b".as_slice()), Some(&"ab"));
-
-// strict_ancestor excludes the exact key.
-assert_eq!(trie.strict_ancestor(b"/a/b".as_slice()), Some(&"a"));
+```sh
+cargo run --example unsync
+cargo run --example sync
 ```
-
-### Ordered queries: min/max, ranges, and a lower-bound cursor
-
-```rust
-use iradix::unsync::Radix;
-
-let mut trie: Radix<u8, u32> = Radix::new();
-for (k, v) in [
-    (b"a".as_slice(), 1),
-    (b"ab".as_slice(), 2),
-    (b"b".as_slice(), 3),
-    (b"c".as_slice(), 4),
-] {
-    trie.insert(k, v);
-}
-
-assert_eq!(trie.minimum(), Some((b"a".to_vec(), &1)));
-assert_eq!(trie.maximum(), Some((b"c".to_vec(), &4)));
-
-// `range` yields reconstructed (key, value) pairs in ascending key order.
-let got: Vec<(Vec<u8>, u32)> = trie
-    .range::<[u8], _>((core::ops::Bound::Included(b"ab".as_slice()), core::ops::Bound::Included(b"b".as_slice())))
-    .map(|(k, v)| (k, *v))
-    .collect();
-assert_eq!(got, vec![(b"ab".to_vec(), 2), (b"b".to_vec(), 3)]);
-
-// `seek_lower_bound` is a forward cursor at the first key >= the argument.
-let from_b: Vec<u32> = trie.seek_lower_bound(b"b".as_slice()).map(|(_, v)| *v).collect();
-assert_eq!(from_b, vec![3, 4]);
-
-// `delete_prefix` removes the key and every descendant (node-inclusive).
-assert_eq!(trie.delete_prefix(b"a".as_slice()), 2); // "a" and "ab"
-```
-
-### Snapshots are O(1) and isolated
-
-```rust
-use iradix::unsync::Radix;
-
-let mut trie: Radix<u8, u32> = Radix::new();
-trie.insert(b"k".as_slice(), 1);
-
-let snapshot = trie.clone(); // O(1), no value clones
-trie.insert(b"k".as_slice(), 2);
-
-assert_eq!(snapshot.get(b"k".as_slice()), Some(&1)); // unaffected
-assert_eq!(trie.get(b"k".as_slice()), Some(&2));
-```
-
-### Sharing a snapshot across threads
-
-`iradix` ships no built-in concurrent holder. A [`sync::Radix`] is an immutable,
-`O(1)`-clone snapshot (like go-immutable-radix's `Tree`): clone it, mutate the
-clone, and publish it yourself. For a shared atomic holder, wrap it in
-`arc_swap::ArcSwap<sync::Radix<…>>` (or a `Mutex`) — `load` a wait-free snapshot to
-read, and `store` a freshly mutated clone to publish a new version.
 
 ## Cargo features
 
