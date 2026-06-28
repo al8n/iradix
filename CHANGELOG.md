@@ -60,8 +60,9 @@ Initial release.
     `&mut self` API, with cross-thread-shareable snapshots.
 - Reads (`V`-bound-free): `get`, `contains`, `get_ancestor` (inclusive),
   `strict_ancestor`, `has_ancestor`, `values`, `ancestors`, `descendants`.
-- Mutators: `insert`, `remove`, `remove_descendants` (count + unlink, no value
-  clone), `drain_descendants`, `clear`.
+- Mutators: `insert`, `remove`, `remove_descendants` (count + unlink; clones no
+  removed value — only retained path values may be copy-on-write-cloned),
+  `drain_descendants`, `clear`.
 - No built-in concurrent holder: `sync::Radix` is an immutable, `O(1)`-clone
   snapshot (like go-immutable-radix's `Tree`) — clone it, mutate the clone, and
   publish it yourself (e.g. wrap it in `arc_swap::ArcSwap<sync::Radix<…>>` or a
