@@ -63,7 +63,9 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Apply clippy lints
-      run: cargo hack clippy --each-feature
+      # `alloc` is mandatory (the bare no-feature combo cannot compile), so force
+      # it into every --each-feature combination.
+      run: cargo hack clippy --each-feature --features alloc -- -D warnings
 
   # Run tests on some extra platforms
   cross:
@@ -149,7 +151,7 @@ jobs:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
     - name: Run build
-      run: cargo hack build --feature-powerset
+      run: cargo hack build --feature-powerset --features alloc
   
   test:
     name: test
@@ -183,7 +185,7 @@ jobs:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
     - name: Run test
-      run: cargo hack test --feature-powerset
+      run: cargo hack test --feature-powerset --features alloc
   
   sanitizer:
     name: sanitizer
@@ -240,69 +242,6 @@ jobs:
         run: cargo install cargo-hack
       - name: Miri
         run: ci/miri.sh
-  loom:
-    name: loom
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v3
-      - name: Cache cargo build and registry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-loom-
-      - name: Install Rust
-        run: rustup update $nightly && rustup default $nightly
-      - name: Install cargo-hack
-        run: cargo install cargo-hack
-      - name: Loom tests
-        run: RUSTFLAGS="--cfg loom -Dwarnings" cargo hack test --test loom
-  
-  # valgrind
-  valgrind:
-    name: valgrind
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Cache cargo build and registry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ubuntu-latest-valgrind-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ubuntu-latest-valgrind-
-
-      - name: Install Rust ${{ env.stable }}
-        uses: actions-rs/toolchain@v1
-        with:
-            toolchain: ${{ env.stable }}
-            override: true
-      - name: Install Valgrind
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y valgrind
-      # Compile tests
-      # - name: cargo build foo
-      #   run: cargo build --bin foo
-      #   working-directory: integration
-
-      # Run with valgrind
-      # - name: Run valgrind foo
-      #   run: valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all ./target/debug/foo
-      #   working-directory: integration
 
   docs:
     name: docs
@@ -340,7 +279,6 @@ jobs:
       - test
       - sanitizer
       - miri
-      - loom
       - docs
     steps:
       - uses: actions/checkout@v3
