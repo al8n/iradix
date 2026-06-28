@@ -43,9 +43,10 @@ dependency on any of it: it is a plain, reusable container.
   (`values` / `values_rev`, `descendants` / `descendants_rev`), and key-ordered
   `range` (any `RangeBounds`) / `seek_lower_bound` cursors that yield reconstructed
   `(key, value)` pairs.
-- **Lock-free concurrent holder.** [`sync::ConcurrentRadix`] wraps a shared trie
-  with wait-free snapshot reads and compare-and-swap transactional writes (build
-  a private working copy, then `commit` — retry on conflict).
+- **Bring-your-own concurrency.** `iradix` ships no built-in concurrent holder.
+  [`sync::Radix`] is an immutable, `O(1)`-clone snapshot (like go-immutable-radix's
+  `Tree`): clone it, mutate the clone, and publish it yourself — e.g. wrap it in
+  `arc_swap::ArcSwap<sync::Radix<…>>` or a `Mutex` for a shared atomic holder.
 - **`no_std` + `alloc`.** `std` and `alloc` are independent features.
 
 ## Installation
@@ -132,34 +133,20 @@ assert_eq!(snapshot.get(b"k".as_slice()), Some(&1)); // unaffected
 assert_eq!(trie.get(b"k".as_slice()), Some(&2));
 ```
 
-### Lock-free concurrent holder with transactional writes
+### Sharing a snapshot across threads
 
-```rust
-use iradix::sync::ConcurrentRadix;
-
-let holder: ConcurrentRadix<u8, u32> = ConcurrentRadix::new();
-
-// `commit_with` builds a private working copy and publishes it with a CAS,
-// retrying automatically if a concurrent writer wins the race.
-holder.commit_with(|txn| {
-    txn.insert(b"a".as_slice(), 1);
-    txn.insert(b"a/b".as_slice(), 2);
-    txn.remove_descendants(b"a".as_slice()); // removes a/b but not a
-});
-
-// Readers take a wait-free, point-in-time snapshot.
-let snap = holder.load();
-assert_eq!(snap.get(b"a".as_slice()), Some(&1));
-assert_eq!(snap.get(b"a/b".as_slice()), None);
-```
+`iradix` ships no built-in concurrent holder. A [`sync::Radix`] is an immutable,
+`O(1)`-clone snapshot (like go-immutable-radix's `Tree`): clone it, mutate the
+clone, and publish it yourself. For a shared atomic holder, wrap it in
+`arc_swap::ArcSwap<sync::Radix<…>>` (or a `Mutex`) — `load` a wait-free snapshot to
+read, and `store` a freshly mutated clone to publish a new version.
 
 ## Cargo features
 
 | feature | default | effect |
 |---|---|---|
-| `std` | yes | enables the `std` build and the wait-free [`sync::ConcurrentRadix`] backend (`arc-swap`). |
-| `alloc` | no | `no_std` + heap; provides the `spin::RwLock` [`sync::ConcurrentRadix`] backend. Independent of `std`. |
-| `lockfree-nostd` | no | **reserved** for a future `haphazard` lock-free `no_std` backend; not yet active (it enables `alloc`, and the `spin` backend stays in place). |
+| `std` | yes | links the real standard library. |
+| `alloc` | no | `no_std` + heap (the `alloc`-as-`std` alias). Independent of `std`. |
 
 `std` and `alloc` are independent (`std` does **not** imply `alloc`). The crate
 always needs the heap, so the bare no-feature configuration does not compile —
@@ -189,7 +176,6 @@ be dual licensed as above, without any additional terms or conditions.
 [`RadixKey`]: https://docs.rs/iradix/latest/iradix/trait.RadixKey.html
 [`unsync::Radix`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html
 [`sync::Radix`]: https://docs.rs/iradix/latest/iradix/sync/struct.Radix.html
-[`sync::ConcurrentRadix`]: https://docs.rs/iradix/latest/iradix/sync/struct.ConcurrentRadix.html
 [`get_ancestor`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html#method.get_ancestor
 [`strict_ancestor`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html#method.strict_ancestor
 [`clone`]: https://docs.rs/iradix/latest/iradix/unsync/struct.Radix.html#impl-Clone-for-Radix

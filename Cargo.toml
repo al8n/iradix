@@ -13,23 +13,16 @@ keywords = ["radix", "trie", "persistent", "immutable", "copy-on-write"]
 
 [features]
 default = ["std"]
-# `std` and `alloc` are INDEPENDENT: `std` does not imply `alloc`. `archery`
-# always provides the heap (`Rc`/`Arc`) and has no std/alloc feature of its own,
-# so each tier only layers on its own lock backend.
-std = ["dep:arc-swap"]
-alloc = ["dep:spin"]
-# `lockfree-nostd` is a no_std tier: it requires `alloc` so the `alloc`-as-`std`
-# alias and the `spin` fallback backend are present (the `haphazard` lock-free
-# backend is reserved; see `ConcurrentRadix`).
-lockfree-nostd = ["alloc", "dep:haphazard"]
+# `std` and `alloc` are INDEPENDENT cfg markers: `std` does not imply `alloc`.
+# `std` links the real standard library; `alloc` (without `std`) selects the
+# `alloc`-as-`std` alias for a no_std + heap build. `archery` always provides the
+# heap (`Rc`/`Arc`) and has no std/alloc feature of its own, so neither marker
+# layers any dependency feature.
+std = []
+alloc = []
 
 [dependencies]
 archery = { version = "1", default-features = false }
-arc-swap = { version = "1", optional = true }
-spin = { version = "0.10", optional = true, default-features = false, features = [
-  "rwlock",
-] }
-haphazard = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 proptest = "1"

@@ -32,12 +32,6 @@ makes no guarantee across either:
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
 
-// `lockfree-nostd` is a no_std tier and depends on the `alloc`-as-`std` alias and
-// the `spin` backend, both gated on `alloc`. The `lockfree-nostd = ["alloc", ...]`
-// feature wires this up; this guard catches a future edit that breaks it.
-#[cfg(all(feature = "lockfree-nostd", not(feature = "alloc")))]
-compile_error!("feature `lockfree-nostd` requires `alloc` (it is enabled by the feature itself)");
-
 // The `alloc`-as-`std` alias lets genuine-heap `std::` paths compile unchanged
 // under no_std+alloc. Suppressed under `test`, where the real `std` is linked.
 #[cfg(all(not(feature = "std"), feature = "alloc", not(test)))]

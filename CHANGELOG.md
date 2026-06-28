@@ -4,9 +4,9 @@
 
 ### Added — go-immutable-radix parity
 
-Ordered operations on both `unsync::Radix` and `sync::Radix` (and forwarded
-through the concurrent `Txn`). Ordered queries return reconstructed keys as
-`Vec<C::Owned>`; value-only iterators stay decompose-only and `V`-bound-free.
+Ordered operations on both `unsync::Radix` and `sync::Radix`. Ordered queries
+return reconstructed keys as `Vec<C::Owned>`; value-only iterators stay
+decompose-only and `V`-bound-free.
 
 - `minimum` / `maximum`: the smallest / largest key (component lexicographic
   order) and its value.
@@ -47,9 +47,8 @@ Initial release.
   `strict_ancestor`, `has_ancestor`, `values`, `ancestors`, `descendants`.
 - Mutators: `insert`, `remove`, `remove_descendants` (count + unlink, no value
   clone), `drain_descendants`, `clear`.
-- `sync::ConcurrentRadix<C, V>` lock-free shared holder: wait-free snapshot reads
-  (`load`), and transactional writes via a private working copy published with a
-  compare-and-swap (`txn` / `commit` returning `Conflict` on a lost race, plus a
-  `commit_with` retry convenience). `arc-swap` backend on `std`; `spin::RwLock`
-  backend on `no_std` + `alloc`.
+- No built-in concurrent holder: `sync::Radix` is an immutable, `O(1)`-clone
+  snapshot (like go-immutable-radix's `Tree`) — clone it, mutate the clone, and
+  publish it yourself (e.g. wrap it in `arc_swap::ArcSwap<sync::Radix<…>>` or a
+  `Mutex` for a shared atomic holder).
 - `no_std` support with independent `std` and `alloc` features.
