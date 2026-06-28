@@ -718,6 +718,58 @@ fn remove_descendants_never_clones_values_and_survives_label_panic() {
 }
 
 #[test]
+fn delete_prefix_on_shared_trie_never_clones_removed_values() {
+  // `delete_prefix` is count-only and node-inclusive. Even on a SHARED trie — where
+  // mutation copies the path to the prefix — it must not clone the VALUES being
+  // removed (it unlinks the doomed edge rather than copying the subtree). So a value
+  // whose clone always panics, stored at and below the deleted prefix, is fine. The
+  // prefix is a direct child of the (valueless) root, so no ancestor value is on the
+  // copied path either, making the expected value-clone count exactly zero.
+  let mut t: Radix<KeyBomb, ValBomb> = Radix::new();
+  t.insert(&key(&[1]), ValBomb(1));
+  t.insert(&key(&[1, 2]), ValBomb(2));
+  t.insert(&key(&[1, 3]), ValBomb(3));
+  let snap = t.clone(); // share the whole subtree
+  assert_eq!(t.len(), 3);
+
+  VAL_FUSE.with(|c| c.set(Some(0))); // panic on ANY value clone
+  let removed = catch_unwind(AssertUnwindSafe(|| t.delete_prefix(key(&[1]).as_slice())));
+  VAL_FUSE.with(|c| c.set(None));
+
+  assert_eq!(
+    removed.ok(),
+    Some(3),
+    "delete_prefix must not clone any removed value, even on a shared trie"
+  );
+  assert_eq!(t.len(), 0);
+  assert_eq!(t.count_values(), 0);
+  // The snapshot is untouched (structural sharing preserved).
+  assert_eq!(snap.len(), 3);
+  assert_eq!(snap.get(key(&[1, 2]).as_slice()), Some(&ValBomb(2)));
+}
+
+#[test]
+fn drain_prefix_on_shared_trie_returns_values_without_corrupting_snapshot() {
+  // `drain_prefix` clones values out in phase 1 (its contract), then phase 2 unlinks
+  // the doomed edge WITHOUT re-cloning (no `make_mut` on the subtree). On a shared
+  // trie the snapshot must be left intact and the returned values correct.
+  let mut t: Radix<u8, u32> = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"ab"), 2);
+  t.insert(&bytes(b"ac"), 3);
+  let snap = t.clone();
+
+  let mut drained = t.drain_prefix(b"a".as_slice());
+  drained.sort_unstable();
+  assert_eq!(drained, vec![1, 2, 3], "node-inclusive: a, ab, ac");
+  assert_eq!(t.len(), 0);
+  // Snapshot intact — phase 2 unlinked from the live copy only.
+  assert_eq!(snap.len(), 3);
+  assert_eq!(snap.get(b"a".as_slice()), Some(&1));
+  assert_eq!(snap.get(b"ac".as_slice()), Some(&3));
+}
+
+#[test]
 fn remove_descendants_merge_moves_labels_keeps_len() {
   // Shape: root -> [1](v) -> [2](valueless) -> { [3] -> {[30](v),[31](v)}, [4](v) }.
   // Removing the strict descendants of [1,2,3] empties [3] (pruned), dropping the
