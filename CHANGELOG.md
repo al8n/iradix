@@ -25,10 +25,14 @@ sharing — bring-your-own-key, `no_std + alloc`, parameterized over `Rc` / `Arc
 - A persistent copy-on-write radix trie with structural sharing, split into two
   public faces over one shared internal algorithm core (the reference-counting
   pointer is an internal detail, never in the public API):
-  - `unsync::Radix<C, V>` — `Rc`-backed, `!Send`; direct `&mut self` copy-on-write
-    mutation; `.clone()` is an `O(1)` structurally-shared snapshot.
-  - `sync::Radix<C, V>` — `Arc`-backed, `Send + Sync` (auto-derived); the same API
-    with cross-thread-shareable snapshots.
+  - `unsync::Radix<C, V>` — `Rc`-backed, `!Send`; a direct `&mut self` copy-on-write
+    handle; `.clone()` is an `O(1)` structurally-shared snapshot.
+  - `sync::Radix<C, V>` — `Arc`-backed, `Send + Sync` (auto-derived); an **immutable
+    persistent tree** (go-immutable-radix's `Tree`) with cross-thread-shareable
+    snapshots. Mutate it via a `Txn` (`sync::Txn<C, V>`, an owned working copy —
+    open with `txn()`, edit, then `commit()`) or with one-op `&self` methods
+    (`insert` / `remove` / `delete_prefix` / …) that each return the next tree.
+    Build one in bulk from `(Vec<C>, V)` pairs via `FromIterator`.
 - Path-compressed edges held in the parent's `Vec`, sorted by first component and
   located by binary search — no hashing.
 
@@ -52,6 +56,9 @@ sharing — bring-your-own-key, `no_std + alloc`, parameterized over `Rc` / `Arc
 
 ### Mutators (`C: Ord + Clone`, `V: Clone`)
 
+The same set on every face — `&mut self` on `unsync::Radix` and `sync::Txn`;
+`&self`-returning-the-next-tree on `sync::Radix`:
+
 - `insert`, `remove`, `clear`.
 - Strict — keep the value at the key: `remove_descendants` (count) /
   `drain_descendants` (values).
@@ -63,10 +70,11 @@ sharing — bring-your-own-key, `no_std + alloc`, parameterized over `Rc` / `Arc
 
 ### Concurrency & `no_std`
 
-- No built-in concurrent holder: `sync::Radix` is an immutable, `O(1)`-clone
-  snapshot (like go-immutable-radix's `Tree`) — clone it, mutate the clone, and
-  publish it yourself (e.g. wrap it in `arc_swap::ArcSwap<sync::Radix<…>>` or a
-  `Mutex` for a shared atomic holder).
+- No built-in concurrent holder: `sync::Radix` is an immutable, `O(1)`-clone tree,
+  so lock-free sharing is the user's `arc_swap::ArcSwap<sync::Radix<…>>` — readers
+  `load()` a wait-free snapshot; a writer opens a `txn()`, `commit()`s the next
+  tree, and publishes it with a compare-and-swap retry loop (a worked example ships
+  in `examples/`). `unsync::Radix` stays the direct `&mut self` copy-on-write handle.
 - `no_std` with independent `std` and `alloc` features (the crate always needs the
   heap; `std` does not imply `alloc`).
 
