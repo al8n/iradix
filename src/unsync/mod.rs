@@ -281,7 +281,8 @@ where
   }
 
   /// Removes every *strict* descendant of `key` (the value at `key`, if any, is
-  /// kept). Returns the number of values removed. Never clones a `V`.
+  /// kept). Returns the number of values removed. Clones no *removed* value — only
+  /// the copy-on-write path to `key` may be duplicated, as in every mutator.
   pub fn remove_descendants<K>(&mut self, key: &K) -> usize
   where
     K: RadixKey<Component = C> + ?Sized,
@@ -304,7 +305,9 @@ where
   /// go-immutable-radix's `DeletePrefix`), returning the number of values removed.
   ///
   /// Contrast [`remove_descendants`](Radix::remove_descendants), which keeps the
-  /// value stored at `key` itself. Never clones a `V`.
+  /// value stored at `key` itself. Clones no *removed* value — only retained
+  /// ancestors on the copied path may be cloned by copy-on-write, as in every
+  /// mutator.
   pub fn delete_prefix<K>(&mut self, key: &K) -> usize
   where
     K: RadixKey<Component = C> + ?Sized,
