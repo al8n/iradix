@@ -1,6 +1,6 @@
 [package]
 name = "iradix"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 repository = "https://github.com/al8n/iradix"
@@ -13,8 +13,6 @@ keywords = ["radix", "trie", "persistent", "immutable", "copy-on-write"]
 
 [features]
 default = ["std"]
-# `event-listener?/std` is a weak feature: it turns on event-listener's blocking
-# `wait()` only when the `watch` feature has already pulled the dependency in.
 std = ["event-listener?/std"]
 alloc = []
 # Observe key/prefix changes across committed versions. Async `Watch::changed()`
@@ -23,12 +21,9 @@ watch = ["dep:event-listener"]
 # Runtime-agnostic async `Watch::changed_timeout::<R>()` via agnostic-lite's
 # `RuntimeLite` (re-exported as `iradix::RuntimeLite`). Brings the trait only; name a
 # runtime `R` from agnostic-lite itself. Works on no_std + alloc.
-agnostic-lite = ["dep:agnostic-lite", "watch"]
-# Convenience: enable agnostic-lite's tokio / smol backend AND re-export its runtime
-# as `iradix::TokioRuntime` / `iradix::SmolRuntime`, so a runtime is nameable from
-# iradix alone. Other backends (async-io / wasm / embassy): add agnostic-lite directly.
-tokio = ["agnostic-lite", "agnostic-lite/tokio"]
-smol = ["agnostic-lite", "agnostic-lite/smol"]
+future = ["dep:agnostic-lite", "watch"]
+tokio = ["future", "agnostic-lite/tokio"]
+smol = ["future", "agnostic-lite/smol"]
 
 [dependencies]
 archery = { version = "1", default-features = false }
@@ -41,7 +36,6 @@ agnostic-lite = { version = "0.6", optional = true, default-features = false, fe
 arc-swap = "1"
 proptest = "1"
 pollster = "0.4"
-# Exercise the agnostic-lite async timeout against a concrete runtime.
 agnostic-lite = { version = "0.6", features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 
@@ -61,11 +55,8 @@ rpath = false
 
 [[example]]
 name = "watch"
-# The example blocks (`block_wait()`), spawns threads, and uses pollster — all std.
 required-features = ["watch", "std"]
 
 [[example]]
 name = "watch_timeout"
-# Uses the re-exported `iradix::TokioRuntime` — the `tokio` feature (which implies
-# `agnostic-lite`) — on a tokio runtime; all std.
 required-features = ["tokio", "std"]

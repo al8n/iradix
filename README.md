@@ -90,14 +90,14 @@ dependency on any of it: it is a plain, reusable container.
 
 ```toml
 [dependencies]
-iradix = "0.1"
+iradix = "0.2"
 ```
 
 For `no_std` (heap required):
 
 ```toml
 [dependencies]
-iradix = { version = "0.1", default-features = false, features = ["alloc"] }
+iradix = { version = "0.2", default-features = false, features = ["alloc"] }
 ```
 
 ## Examples
@@ -125,7 +125,7 @@ cargo run --example watch --features watch
 | `std` | yes | links the real standard library. |
 | `alloc` | no | `no_std` + heap (the `alloc`-as-`std` alias). Independent of `std`. |
 | `watch` | no | observe key/prefix changes on the `sync` face: `watch` / `watch_prefix` / `get_watch` → blocking `Watch::{block_wait, block_wait_timeout}` (need `std`) or async `Watch::changed()` (a named `Changed` future; `no_std + alloc`), with publish-time notification via `notify_changes_since` / `publish_to`. Pulls `event-listener`. |
-| `agnostic-lite` | no | runtime-agnostic async timeout: `Watch::changed_timeout::<R>(d)` (`R` = `TokioRuntime` / `SmolRuntime` / `WasmRuntime` / `EmbassyRuntime` / …) → `Result<(), Elapsed>`. Built on [`agnostic-lite`](https://docs.rs/agnostic-lite); re-exports the `RuntimeLite` trait as `iradix::RuntimeLite`. Implies `watch`; `no_std + alloc`. |
+| `future` | no | runtime-agnostic async timeout: `Watch::changed_timeout::<R>(d)` (`R` = `TokioRuntime` / `SmolRuntime` / `WasmRuntime` / `EmbassyRuntime` / …) → `Result<(), Elapsed>`. Built on [`agnostic-lite`](https://docs.rs/agnostic-lite); re-exports the `RuntimeLite` trait as `iradix::RuntimeLite`. Implies `watch`; `no_std + alloc`. |
 | `tokio` / `smol` | no | convenience: enable agnostic-lite's tokio / smol backend **and** re-export its runtime as `iradix::TokioRuntime` / `iradix::SmolRuntime` (each implies `agnostic-lite`), so a runtime is nameable from iradix alone. Other backends (`async-io` / `wasm` / `embassy`) — add `agnostic-lite` directly. |
 
 `std` and `alloc` are independent (`std` does **not** imply `alloc`). The crate
@@ -137,7 +137,7 @@ build with at least `alloc`.
 The crate is `no_std` with `alloc`. Build it with `--no-default-features
 --features alloc`.
 
-#### License
+## License
 
 <sup>
 Licensed under either of <a href="LICENSE-APACHE">Apache License, Version

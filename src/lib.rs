@@ -57,8 +57,8 @@ pub use key::RadixKey;
 /// `smol` feature additionally re-exports that runtime as `iradix::TokioRuntime` /
 /// `iradix::SmolRuntime`, so a concrete runtime is nameable from iradix alone; for the
 /// other backends (async-io / wasm / embassy) add `agnostic-lite` directly.
-#[cfg(feature = "agnostic-lite")]
-#[cfg_attr(docsrs, doc(cfg(feature = "agnostic-lite")))]
+#[cfg(feature = "future")]
+#[cfg_attr(docsrs, doc(cfg(feature = "future")))]
 pub use agnostic_lite::RuntimeLite;
 
 /// The tokio runtime for [`Watch::changed_timeout`](sync::Watch::changed_timeout),

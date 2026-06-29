@@ -5,6 +5,45 @@ use std::{collections::BTreeMap, vec, vec::Vec};
 
 type Trie = Radix<u8, u32>;
 
+impl<C, V> Radix<C, V>
+where
+  C: Ord,
+{
+  /// Test-only: the true value count by walking the trie.
+  pub(crate) fn count_values(&self) -> usize {
+    self.inner.count_values()
+  }
+
+  /// Test-only: whether the trie is in canonical path-compressed form.
+  pub(crate) fn is_canonical(&self) -> bool {
+    self.inner.is_canonical()
+  }
+
+  /// Test-only: the child subtree pointer for the root edge starting with
+  /// `first`, for structural-sharing (`ptr_eq`) assertions.
+  pub(crate) fn edge_child(
+    &self,
+    first: &C,
+  ) -> Option<archery::SharedPointer<crate::node::Node<ArcK, C, V>, ArcK>> {
+    self.inner.edge_child(first)
+  }
+}
+
+impl<C, V> Txn<C, V>
+where
+  C: Ord,
+{
+  /// Test-only: the true value count by walking the working copy.
+  pub(crate) fn count_values(&self) -> usize {
+    self.working.count_values()
+  }
+
+  /// Test-only: whether the working copy is in canonical path-compressed form.
+  pub(crate) fn is_canonical(&self) -> bool {
+    self.working.is_canonical()
+  }
+}
+
 fn bytes(s: &[u8]) -> Vec<u8> {
   s.to_vec()
 }
