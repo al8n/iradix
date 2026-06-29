@@ -3,7 +3,8 @@
 //! Everything here is generic over the [`archery::SharedPointerKind`] `P` and is
 //! `pub(crate)` only: `archery` is confined to this module and never appears in any
 //! public signature. The two public faces ([`crate::unsync`] / [`crate::sync`])
-//! each fix `P` (`RcK` / `ArcK`) and re-expose this surface bound-minimized.
+//! each fix `P` (`RcK` / `ArcK`, or `ArcTK` under the `triomphe` feature) and
+//! re-expose this surface bound-minimized.
 //!
 //! # Panic safety
 //!

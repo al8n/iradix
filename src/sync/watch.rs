@@ -174,7 +174,7 @@ impl Watch {
   /// counterpart to `block_wait_timeout`. The runtime is chosen with the type
   /// parameter `R` (e.g. `TokioRuntime`, `SmolRuntime`, `WasmRuntime`,
   /// `EmbassyRuntime`), so the crate stays runtime-agnostic; works on
-  /// `no_std + alloc` (e.g. the embassy backend). The `agnostic-lite` feature brings
+  /// `no_std + alloc` (e.g. the embassy backend). The `future` feature brings
   /// only the `RuntimeLite` trait; turn on the `tokio`
   /// or `smol` feature for those backends, or add `agnostic-lite` with another
   /// backend, then name `R` from `agnostic_lite` (e.g.

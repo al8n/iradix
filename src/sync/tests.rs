@@ -24,7 +24,7 @@ where
   pub(crate) fn edge_child(
     &self,
     first: &C,
-  ) -> Option<archery::SharedPointer<crate::node::Node<ArcK, C, V>, ArcK>> {
+  ) -> Option<archery::SharedPointer<crate::node::Node<ArcP, C, V>, ArcP>> {
     self.inner.edge_child(first)
   }
 }
@@ -103,7 +103,8 @@ const fn assert_sync<T: Sync>() {}
 
 #[test]
 fn sync_radix_is_send_sync() {
-  // `sync::Radix` and `sync::Txn` (ArcK) must be Send + Sync when their components
+  // `sync::Radix` and `sync::Txn` (Arc-backed, or triomphe `Arc` under the `triomphe`
+  // feature) must be Send + Sync when their components
   // and values are. These are AUTO-derived (no explicit `unsafe impl Send/Sync`).
   assert_send::<Trie>();
   assert_sync::<Trie>();

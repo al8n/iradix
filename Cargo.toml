@@ -24,6 +24,10 @@ watch = ["dep:event-listener"]
 future = ["dep:agnostic-lite", "watch"]
 tokio = ["future", "agnostic-lite/tokio"]
 smol = ["future", "agnostic-lite/smol"]
+# Back the `sync` face with triomphe's `Arc` (no weak count, more compact) instead of
+# `std::sync::Arc`, via archery's `ArcTK`. Same public API; `no_std + alloc`. No direct
+# triomphe dependency — iradix only names `archery::ArcTK`.
+triomphe = ["archery/triomphe"]
 
 [dependencies]
 archery = { version = "1", default-features = false }

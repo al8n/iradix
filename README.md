@@ -71,7 +71,7 @@ dependency on any of it: it is a plain, reusable container.
   immutable snapshot) return a `Watch` that resolves once a change to the key — or
   anything in its subtree — is *published* — block with `block_wait()` /
   `block_wait_timeout()`, or `await` `changed()` (runtime-agnostic, via
-  `event-listener`; the `agnostic-lite` feature adds the bounded
+  `event-listener`; the `future` feature adds the bounded
   `changed_timeout::<R>()`). Notification is **at
   publish, not at commit** (the **commit → publish → notify** discipline): `commit`
   builds the next tree but fires nothing; the *winner* of publication then calls
@@ -126,7 +126,8 @@ cargo run --example watch --features watch
 | `alloc` | no | `no_std` + heap (the `alloc`-as-`std` alias). Independent of `std`. |
 | `watch` | no | observe key/prefix changes on the `sync` face: `watch` / `watch_prefix` / `get_watch` → blocking `Watch::{block_wait, block_wait_timeout}` (need `std`) or async `Watch::changed()` (a named `Changed` future; `no_std + alloc`), with publish-time notification via `notify_changes_since` / `publish_to`. Pulls `event-listener`. |
 | `future` | no | runtime-agnostic async timeout: `Watch::changed_timeout::<R>(d)` (`R` = `TokioRuntime` / `SmolRuntime` / `WasmRuntime` / `EmbassyRuntime` / …) → `Result<(), Elapsed>`. Built on [`agnostic-lite`](https://docs.rs/agnostic-lite); re-exports the `RuntimeLite` trait as `iradix::RuntimeLite`. Implies `watch`; `no_std + alloc`. |
-| `tokio` / `smol` | no | convenience: enable agnostic-lite's tokio / smol backend **and** re-export its runtime as `iradix::TokioRuntime` / `iradix::SmolRuntime` (each implies `agnostic-lite`), so a runtime is nameable from iradix alone. Other backends (`async-io` / `wasm` / `embassy`) — add `agnostic-lite` directly. |
+| `tokio` / `smol` | no | convenience: enable agnostic-lite's tokio / smol backend **and** re-export its runtime as `iradix::TokioRuntime` / `iradix::SmolRuntime` (each implies `future`), so a runtime is nameable from iradix alone. Other backends (`async-io` / `wasm` / `embassy`) — add `agnostic-lite` directly. |
+| `triomphe` | no | back the `sync` face with [`triomphe`](https://docs.rs/triomphe)'s `Arc` (no weak count, more compact) instead of `std::sync::Arc`, via archery's `ArcTK`. Same public API; opt-in; `no_std + alloc`. |
 
 `std` and `alloc` are independent (`std` does **not** imply `alloc`). The crate
 always needs the heap, so the bare no-feature configuration does not compile —

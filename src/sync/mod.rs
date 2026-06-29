@@ -1,7 +1,8 @@
 //! The thread-safe (`Send + Sync`) immutable radix face.
 //!
 //! [`Radix`] is an **immutable, persistent** trie that fixes the internal pointer
-//! kind to [`Arc`](std::sync::Arc): a value is a cheap, shareable snapshot that is
+//! kind to [`Arc`](std::sync::Arc) — or, with the `triomphe` feature, the more compact
+//! `triomphe::Arc` (no weak count). A value is a cheap, shareable snapshot that is
 //! `Send + Sync` exactly when both `C` and `V` are (both are *auto-derived* — the crate
 //! declares no explicit `unsafe impl Send`/`Sync` anywhere). Every mutation returns
 //! a *new* tree; the original is never observed to change.
@@ -38,7 +39,13 @@ use core::{
   ops::{Bound, RangeBounds},
 };
 
-use archery::ArcK;
+// The sync face fixes the trie's pointer kind: `std::sync::Arc` via `ArcK` by default,
+// or — with the `triomphe` feature — the more compact `triomphe::Arc` (no weak count)
+// via archery's `ArcTK`. The public API is identical either way.
+#[cfg(not(feature = "triomphe"))]
+pub(crate) use archery::ArcK as ArcP;
+#[cfg(feature = "triomphe")]
+pub(crate) use archery::ArcTK as ArcP;
 
 #[cfg(feature = "watch")]
 use event_listener::EventListener;
@@ -69,8 +76,9 @@ mod watch;
 ///
 /// Keys decompose into [`Component`](RadixKey::Component)s via [`RadixKey`]; the
 /// trie is parameterized over the component type `C` and the value type `V`, and
-/// uses [`Arc`](std::sync::Arc) pointers internally, so it is `Send + Sync`
-/// whenever both `C` and `V` are (auto-derived — no `unsafe impl`).
+/// uses [`Arc`](std::sync::Arc) pointers internally — or `triomphe::Arc` with the
+/// `triomphe` feature — so it is `Send + Sync` whenever both `C` and `V` are
+/// (auto-derived — no `unsafe impl`).
 ///
 /// A `Radix` never mutates in place. A [`clone`](Clone::clone) is O(1) and shares
 /// all structure with the original; a committed edit produces a *new* tree that
@@ -117,7 +125,7 @@ mod watch;
 /// add `C: Clone`. Mutation lives on [`Txn`], whose mutators add
 /// `C: Ord + Clone, V: Clone`. Reads are `V`-bound-free and return `&V`.
 pub struct Radix<C, V> {
-  inner: Root<ArcK, C, V>,
+  inner: Root<ArcP, C, V>,
   /// Change slot for the empty (`None`-root) position — there is no node to listen
   /// on while the trie is empty. It is *per empty-epoch*: a run of consecutive empty
   /// versions shares one slot (so a watch armed on any of them sees the first insert),
@@ -411,12 +419,12 @@ where
 /// assert_eq!(base.len(), 0); // the source tree never changed
 /// ```
 pub struct Txn<C, V> {
-  working: Root<ArcK, C, V>,
+  working: Root<ArcP, C, V>,
   /// The version this transaction was opened from, kept so `commit` can decide the
   /// committed tree's empty-epoch slot (carry the base's, or open a fresh one). The
   /// replaced-node diff itself runs later, in [`Radix::notify_changes_since`].
   #[cfg(feature = "watch")]
-  base: Root<ArcK, C, V>,
+  base: Root<ArcP, C, V>,
   /// The base version's empty-position slot. `commit` carries it into the committed
   /// tree while the empty-epoch is unbroken (see [`Radix::notify_changes_since`]).
   #[cfg(feature = "watch")]
@@ -616,7 +624,7 @@ where
 ///
 /// Created by [`Radix::values`].
 pub struct Values<'a, C, V> {
-  inner: ValueIter<'a, ArcK, C, V>,
+  inner: ValueIter<'a, ArcP, C, V>,
 }
 
 impl<'a, C, V> Iterator for Values<'a, C, V> {
@@ -648,7 +656,7 @@ impl<'a, V> Iterator for Ancestors<'a, V> {
 ///
 /// Created by [`Radix::descendants`].
 pub struct Descendants<'a, C, V> {
-  inner: ValueIter<'a, ArcK, C, V>,
+  inner: ValueIter<'a, ArcP, C, V>,
 }
 
 impl<'a, C, V> Iterator for Descendants<'a, C, V> {
@@ -664,7 +672,7 @@ impl<'a, C, V> Iterator for Descendants<'a, C, V> {
 ///
 /// Created by [`Radix::values_rev`].
 pub struct RevValues<'a, C, V> {
-  inner: RevValueIter<'a, ArcK, C, V>,
+  inner: RevValueIter<'a, ArcP, C, V>,
 }
 
 impl<'a, C, V> Iterator for RevValues<'a, C, V> {
@@ -680,7 +688,7 @@ impl<'a, C, V> Iterator for RevValues<'a, C, V> {
 ///
 /// Created by [`Radix::descendants_rev`].
 pub struct RevDescendants<'a, C, V> {
-  inner: RevValueIter<'a, ArcK, C, V>,
+  inner: RevValueIter<'a, ArcP, C, V>,
 }
 
 impl<'a, C, V> Iterator for RevDescendants<'a, C, V> {
@@ -697,7 +705,7 @@ impl<'a, C, V> Iterator for RevDescendants<'a, C, V> {
 /// Each item's key is reconstructed as a `Vec` of its components. Created by
 /// [`Radix::range`] and [`Radix::seek_lower_bound`].
 pub struct Range<'a, C, V> {
-  inner: RangeIter<'a, ArcK, C, V>,
+  inner: RangeIter<'a, ArcP, C, V>,
 }
 
 impl<'a, C, V> Iterator for Range<'a, C, V>

@@ -8,6 +8,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`triomphe` feature** (off by default) — back the `sync` face with
+  [`triomphe`](https://docs.rs/triomphe)'s `Arc` (a more compact atomic refcount with
+  no weak count) instead of `std::sync::Arc`, through archery's `ArcTK` pointer kind.
+  `sync::Radix` keeps the same public API and `Send + Sync`, so it is a drop-in,
+  opt-in swap; `no_std + alloc`.
+
 - **`watch` feature** (off by default) — observe key/prefix changes across
   published versions on the `sync` face. `sync::Radix::watch(key)` /
   `watch_prefix(prefix)` (and `get_watch(key)`, which reads the value and arms a
@@ -15,7 +21,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   change to the watched key — or anything in its subtree — is *published* —
   blocking via `Watch::block_wait()` / `block_wait_timeout()` (need `std`) or async
   via the named `Watch::changed()` future (works on `no_std + alloc`), built on
-  `event-listener`. The optional **`agnostic-lite` feature** adds a runtime-agnostic
+  `event-listener`. The optional **`future` feature** adds a runtime-agnostic
   async timeout — `Watch::changed_timeout::<R>(d)` (`R` = `TokioRuntime` /
   `SmolRuntime` / `WasmRuntime` / `EmbassyRuntime` / …) resolving `Ok(())` on change
   or `Err(Elapsed)` on timeout — while staying `no_std + alloc`. The feature brings
