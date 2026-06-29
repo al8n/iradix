@@ -453,11 +453,26 @@ fn model_remove_descendants(model: &mut BTreeMap<Vec<u8>, u32>, prefix: &[u8]) -
   victims.len()
 }
 
+// Proptests run the full case sweep natively but only a handful under miri:
+// miri models the target address space (4 GiB on 32-bit targets), and the full
+// sweep's cumulative allocations would exhaust it.
+fn proptest_cfg() -> ProptestConfig {
+  ProptestConfig {
+    cases: if cfg!(miri) {
+      8
+    } else {
+      ProptestConfig::default().cases
+    },
+    ..ProptestConfig::default()
+  }
+}
+
 proptest! {
+  #![proptest_config(proptest_cfg())]
   // The sequence of ops is applied through one transaction (read-your-writes),
   // matching the in-place reference model; this also exercises `Txn` end to end.
   #[test]
-  fn model_matches_reference(ops in prop::collection::vec(op_strategy(), 0..60)) {
+  fn model_matches_reference(ops in prop::collection::vec(op_strategy(), 0..if cfg!(miri) { 16 } else { 60 })) {
     let mut txn: Txn<u8, u32> = Radix::new().txn();
     let mut model: BTreeMap<Vec<u8>, u32> = BTreeMap::new();
     for op in ops {
@@ -639,9 +654,10 @@ fn model_delete_prefix(model: &mut BTreeMap<Vec<u8>, u32>, prefix: &[u8]) -> usi
 }
 
 proptest! {
+  #![proptest_config(proptest_cfg())]
   #[test]
   fn ordered_ops_match_model(
-    entries in prop::collection::vec((key_strategy(), 0u32..1000), 0..40),
+    entries in prop::collection::vec((key_strategy(), 0u32..1000), 0..if cfg!(miri) { 12 } else { 40 }),
     lo_k in key_strategy(),
     hi_k in key_strategy(),
     del in key_strategy(),
