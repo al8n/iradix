@@ -133,6 +133,29 @@ cargo run --example watch --features watch
 always needs the heap, so the bare no-feature configuration does not compile —
 build with at least `alloc`.
 
+## Panic safety
+
+`iradix` upholds the strong exception guarantee for the recoverable panic a
+generic container can actually encounter: a panicking user `Clone`, `Ord`, or
+`PartialEq`. If `insert`, `remove`, `remove_descendants`, or `drain_descendants`
+unwinds because user code panicked, the trie is left exactly as it was — `len`
+stays accurate, every previously stored key still resolves, and no stored value is
+dropped or lost (a value-returning call either returns its value or leaves it in
+place).
+
+Two failure modes are **out of scope**, both matching the standard library, which
+makes no guarantee across either:
+
+- **Panicking `Drop`** — a destructor that panics while unwinding aborts the
+  process, so no container can stay sound across one. Removing an edge runs user
+  destructors; if one panics, the operation may be left partially committed. Keep
+  destructors panic-free.
+- **Allocation failure** — like `Vec`/`Box`, `iradix` reaches the global
+  allocator through infallible APIs, so out-of-memory invokes the allocation-error
+  handler (an abort by default), not an unwind. There is therefore no recoverable
+  allocation panic to be safe across; OOM does not corrupt the trie because it
+  does not return.
+
 ## `#![no_std]`
 
 The crate is `no_std` with `alloc`. Build it with `--no-default-features
