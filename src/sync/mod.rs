@@ -21,6 +21,15 @@
 //! through an `arc_swap::ArcSwap<`[`Radix`]`<…>>`: readers `load` a wait-free
 //! snapshot, and a writer opens a [`Txn`], commits it into the next `Radix`, and
 //! publishes it with a compare-and-swap retry loop. See `examples/sync.rs`.
+//!
+//! The discipline is **commit → publish → notify**, in that order:
+//! [`commit`](Txn::commit) builds the next tree but fires nothing, you make it the
+//! live version (a winning compare-and-swap), and only the winner then notifies —
+//! via [`notify_changes_since`](Radix::notify_changes_since), or the two folded into
+//! one by [`publish_to`](Radix::publish_to). This is what makes the `watch` feature
+//! sound under lock-free CAS publishing: a tree that loses the race is discarded
+//! without ever notifying, so a lost CAS cannot strand or falsely wake a watcher.
+//! With the `watch` feature, see [`Watch`].
 
 use std::vec::Vec;
 
@@ -31,10 +40,21 @@ use core::{
 
 use archery::ArcK;
 
+#[cfg(feature = "watch")]
+use event_listener::EventListener;
+
+// `Listener::{wait, wait_timeout}` (the blocking waits) are the only trait methods
+// used; they need std.
+#[cfg(all(feature = "watch", feature = "std"))]
+use event_listener::Listener;
+
 use crate::{
   RadixKey,
   node::{RangeIter, RevValueIter, Root, SliceIter, ValueIter},
 };
+
+#[cfg(feature = "watch")]
+use crate::node::WatchSlot;
 
 /// A generic, persistent (copy-on-write) **immutable** radix trie, shareable across
 /// threads.
@@ -53,7 +73,12 @@ use crate::{
 /// Mutation is via a [`Txn`]: open one with [`txn`](Radix::txn), edit the owned
 /// working copy, then [`commit`](Txn::commit) into the next tree (see the example
 /// below). To publish versions to shared readers, hold the snapshot in an `ArcSwap`
-/// yourself — see the [module docs](crate::sync#lock-free-sharing).
+/// yourself — see the [module docs](crate::sync#lock-free-sharing). The publishing
+/// discipline is **commit → publish → notify**: `commit` builds the tree but fires
+/// no `watch` events; after a *winning* publish (e.g. a successful compare-and-swap)
+/// the new version notifies via
+/// [`notify_changes_since`](Radix::notify_changes_since) (or both at once via
+/// [`publish_to`](Radix::publish_to)), so a tree that lost the race notifies nothing.
 ///
 /// # Examples
 ///
@@ -85,6 +110,14 @@ use crate::{
 /// `C: Ord + Clone, V: Clone`. Reads are `V`-bound-free and return `&V`.
 pub struct Radix<C, V> {
   inner: Root<ArcK, C, V>,
+  /// Change slot for the empty (`None`-root) position — there is no node to listen
+  /// on while the trie is empty. It is *per empty-epoch*: a run of consecutive empty
+  /// versions shares one slot (so a watch armed on any of them sees the first insert),
+  /// and a fresh slot begins each time the trie becomes empty again. A later version's
+  /// [`notify_changes_since`](Radix::notify_changes_since) fires the *base* version's
+  /// slot when the trie went from empty to non-empty.
+  #[cfg(feature = "watch")]
+  empty: std::sync::Arc<WatchSlot>,
 }
 
 // O(1) clone — no `V: Clone` (the pointer is bumped, values are not touched).
@@ -93,6 +126,8 @@ impl<C, V> Clone for Radix<C, V> {
   fn clone(&self) -> Self {
     Self {
       inner: self.inner.clone(),
+      #[cfg(feature = "watch")]
+      empty: self.empty.clone(),
     }
   }
 }
@@ -107,9 +142,22 @@ impl<C, V> Default for Radix<C, V> {
 impl<C, V> Radix<C, V> {
   /// Creates an empty trie. `const`: no allocation happens until the first
   /// insert.
+  #[cfg(not(feature = "watch"))]
   #[inline]
   pub const fn new() -> Self {
     Self { inner: Root::new() }
+  }
+
+  /// Creates an empty trie. With the `watch` feature this allocates the shared
+  /// empty-position change channel, so — unlike the default build — it is not
+  /// `const`.
+  #[cfg(feature = "watch")]
+  #[inline]
+  pub fn new() -> Self {
+    Self {
+      inner: Root::new(),
+      empty: std::sync::Arc::new(WatchSlot::new()),
+    }
   }
 
   /// Returns the number of values stored in the trie.
@@ -134,6 +182,10 @@ impl<C, V> Radix<C, V> {
   pub fn txn(&self) -> Txn<C, V> {
     Txn {
       working: self.inner.clone(),
+      #[cfg(feature = "watch")]
+      base: self.inner.clone(),
+      #[cfg(feature = "watch")]
+      empty: self.empty.clone(),
     }
   }
 }
@@ -352,6 +404,15 @@ where
 /// ```
 pub struct Txn<C, V> {
   working: Root<ArcK, C, V>,
+  /// The version this transaction was opened from, kept so `commit` can decide the
+  /// committed tree's empty-epoch slot (carry the base's, or open a fresh one). The
+  /// replaced-node diff itself runs later, in [`Radix::notify_changes_since`].
+  #[cfg(feature = "watch")]
+  base: Root<ArcK, C, V>,
+  /// The base version's empty-position slot. `commit` carries it into the committed
+  /// tree while the empty-epoch is unbroken (see [`Radix::notify_changes_since`]).
+  #[cfg(feature = "watch")]
+  empty: std::sync::Arc<WatchSlot>,
 }
 
 impl<C, V> Txn<C, V> {
@@ -375,11 +436,64 @@ impl<C, V> Txn<C, V> {
 
   /// Consumes the transaction and returns the next immutable [`Radix`] holding all
   /// committed edits.
+  ///
+  /// Committing builds the next tree only; it fires **no** `watch` events. With the
+  /// `watch` feature, publishing follows **commit → publish → notify**: after the
+  /// returned tree wins publication (e.g. a successful compare-and-swap), call
+  /// [`Radix::notify_changes_since`] against the version this transaction was opened
+  /// from — or fold the publish and notify together with [`Radix::publish_to`]. A
+  /// committed-then-discarded tree (a lost CAS) must NOT notify.
+  #[cfg(not(feature = "watch"))]
   #[inline]
   #[must_use = "returns the new tree holding the committed edits"]
   pub fn commit(self) -> Radix<C, V> {
     Radix {
       inner: self.working,
+    }
+  }
+
+  /// Consumes the transaction and returns the next immutable [`Radix`] holding all
+  /// committed edits.
+  ///
+  /// Committing builds the next tree only; it fires **no** `watch` events. Publishing
+  /// follows **commit → publish → notify**: after the returned tree wins publication
+  /// (e.g. a successful compare-and-swap), call [`Radix::notify_changes_since`]
+  /// against the version this transaction was opened from — or fold the publish and
+  /// notify together with [`Radix::publish_to`]. A committed-then-discarded tree (a
+  /// lost CAS) must NOT notify.
+  #[cfg(feature = "watch")]
+  #[inline]
+  #[must_use = "returns the new tree holding the committed edits"]
+  pub fn commit(self) -> Radix<C, V> {
+    let mut working = self.working;
+    // Canonicalize a *logically* empty working copy to physical `None`-root FIRST, so
+    // "empty ⟺ root is None" holds: a net-empty txn (insert-then-remove from an empty
+    // base) commits `len == 0` but with a physical `root = Some(empty node)`, which
+    // the publish-time diff would otherwise misread as a None -> Some transition and
+    // use to spuriously wake empty-position watchers though nothing was published.
+    working.canonicalize_empty();
+    // Carry an empty-position slot *per empty-epoch* so the empty-then-insert no-op
+    // case still wakes watchers (see `Radix::notify_changes_since`): a run of
+    // consecutive empty versions shares one slot, and a fresh slot opens only when
+    // the trie newly becomes empty. The slot is dormant for non-empty versions.
+    let empty = if working.root_is_none() {
+      if self.base.root_is_none() {
+        // None -> None: same empty epoch, carry the base's slot so an arm on the
+        // base and an arm on this commit fire together when a later insert lands.
+        self.empty.clone()
+      } else {
+        // Some -> None: a new empty epoch begins; nothing armed on the prior
+        // (non-empty) version's empty slot, so start fresh.
+        std::sync::Arc::new(WatchSlot::new())
+      }
+    } else {
+      // Non-empty: the empty slot is dormant; carry it so the epoch is preserved if
+      // a later commit empties the trie back out without changing it in between.
+      self.empty.clone()
+    };
+    Radix {
+      inner: working,
+      empty,
     }
   }
 }
@@ -687,6 +801,220 @@ where
   /// Test-only: whether the working copy is in canonical path-compressed form.
   pub(crate) fn is_canonical(&self) -> bool {
     self.working.is_canonical()
+  }
+}
+
+/// A pending observation of a key or prefix, returned by [`Radix::watch`] /
+/// [`Radix::watch_prefix`] / [`Radix::get_watch`].
+///
+/// A `Watch` is **edge-triggered against the exact snapshot it was armed on**: it
+/// resolves *once*, for the next change to the watched key (or anything in its
+/// subtree) that is **published** to that version — that is, a later
+/// [`commit`](Txn::commit) whose tree is then made live and calls
+/// [`notify_changes_since`](Radix::notify_changes_since) (committing alone fires
+/// nothing). It is single-use, and bound to that one version: never reuse a `Watch`
+/// after it fires, and never arm against a snapshot different from the one you read.
+///
+/// A `Watch` is armed against one immutable snapshot: it registers a listener on
+/// that snapshot's node slot and re-checks the node's sticky flag, so a change
+/// published to that snapshot is never missed — and if the node was already replaced
+/// by an earlier publish, the `Watch` is created already-resolved. (The listener plus
+/// the sticky-flag re-check is what closes the race; the snapshot is immutable, so
+/// whether you read a value before or after arming does not matter.) Use
+/// [`get_watch`](Radix::get_watch) to read a value and arm against the *same*
+/// snapshot in one call.
+///
+/// It may **over-notify**: because there is one change channel per node and any
+/// ancestor of a change is path-copied, a change to a *descendant* (or a sibling
+/// merged onto the same node) can wake a key watcher whose own value did not change
+/// — re-read to confirm. It never under-notifies, given non-panicking key
+/// comparisons and async wakers (a panic in either during notification is out of
+/// scope, like a panicking `Drop`).
+///
+/// To track a key across versions, loop: read-and-arm via
+/// [`get_watch`](Radix::get_watch), wait, then **reload the holder and re-arm**
+/// against the new live version before waiting again.
+///
+/// ```no_run
+/// # #[cfg(all(feature = "watch", feature = "std"))] {
+/// use std::sync::Arc;
+/// use arc_swap::ArcSwap;
+/// use iradix::sync::Radix;
+///
+/// let holder: Arc<ArcSwap<Radix<u8, u32>>> = Arc::new(ArcSwap::from_pointee(Radix::new()));
+/// loop {
+///   let snap = holder.load_full();              // reload the live version
+///   let (value, watch) = snap.get_watch(b"k".as_slice()); // read + arm on one snapshot
+///   # let _ = value;
+///   watch.wait();                               // block until the next published change
+///   # break;
+/// }
+/// # }
+/// ```
+#[cfg(feature = "watch")]
+pub struct Watch(Option<EventListener>);
+
+#[cfg(feature = "watch")]
+impl Watch {
+  /// Blocks the current thread until the watched key or prefix changes (returns at
+  /// once if it already has).
+  #[cfg(feature = "std")]
+  #[inline]
+  pub fn wait(self) {
+    if let Some(listener) = self.0 {
+      listener.wait();
+    }
+  }
+
+  /// Blocks until the watched key or prefix changes, or `timeout` elapses. Returns
+  /// `true` if it changed (or already had), `false` on timeout.
+  #[cfg(feature = "std")]
+  #[inline]
+  pub fn wait_timeout(self, timeout: core::time::Duration) -> bool {
+    match self.0 {
+      None => true,
+      Some(listener) => listener.wait_timeout(timeout).is_some(),
+    }
+  }
+
+  /// Resolves when the watched key or prefix changes (immediately if it already
+  /// has). Runtime-agnostic: drive it with any async executor.
+  #[inline]
+  pub async fn changed(self) {
+    if let Some(listener) = self.0 {
+      listener.await;
+    }
+  }
+}
+
+#[cfg(feature = "watch")]
+impl<C, V> Radix<C, V>
+where
+  C: Ord,
+{
+  /// Wake every [`Watch`] armed on `base` whose key — or any key in its subtree —
+  /// differs in `self`.
+  ///
+  /// Call EXACTLY ONCE, and ONLY AFTER `self` has been published as the live version
+  /// (e.g. a winning [`ArcSwap`](https://docs.rs/arc-swap) compare-and-swap).
+  /// Committing produces a tree but does not notify; a committed-then-discarded tree
+  /// (a lost CAS) must NOT call this. May over-notify (a descendant change can wake a
+  /// key watcher — re-read to confirm); never under-notifies, given non-panicking key
+  /// comparisons.
+  ///
+  /// Firing is **all-or-nothing**: the changed nodes' slots are *collected* by a
+  /// fallible diff walk (which runs user `C` comparisons), then fired in a separate
+  /// loop. So a panicking `Ord`/`PartialEq` aborts the walk having fired nothing for
+  /// this transition — matching the crate's strong-exception style. The fire loop
+  /// calls each slot's `Event::notify`, which wakes any registered async waker; the
+  /// guarantee assumes those wakers do not panic. A panicking waker (a `Waker`-
+  /// contract violation) can abort the loop after a partial fire and is **out of
+  /// scope**, exactly as a panicking `Drop` is for the mutators (see the crate docs).
+  ///
+  /// `self` is the newly published tree and `base` the version the producing
+  /// transaction was opened from. See [`publish_to`](Radix::publish_to) to fold the
+  /// publish and this notify into one call, and the [module docs](crate::sync#lock-free-sharing)
+  /// for the commit → publish → notify discipline.
+  #[inline]
+  pub fn notify_changes_since(&self, base: &Self) {
+    // Collect first (fallible: user comparisons), then fire (infallible). A panic in
+    // the collect walk drops `slots`, firing nothing — so a transition either fires
+    // every changed slot or none of them, never a partial set that strands watchers.
+    let mut slots = Vec::new();
+    let fire_empty = self.inner.collect_changes(&base.inner, &mut slots);
+    for slot in slots {
+      slot.fire();
+    }
+    if fire_empty {
+      base.empty.fire();
+    }
+  }
+
+  /// Publish-then-notify in one call.
+  ///
+  /// `swap` attempts to install `self` as the live version and returns `true` iff it
+  /// won (became visible). On a win, fires notifications relative to `base` (via
+  /// [`notify_changes_since`](Radix::notify_changes_since)); on a loss, fires
+  /// nothing. This is the [`watch`](Radix::watch)-safe shape of the commit → publish
+  /// → notify discipline: a tree that lost the race never notifies.
+  ///
+  /// ```no_run
+  /// # #[cfg(feature = "watch")] {
+  /// use std::sync::Arc;
+  /// use arc_swap::ArcSwap;
+  /// use iradix::sync::Radix;
+  ///
+  /// let holder: Arc<ArcSwap<Radix<u8, u32>>> = Arc::new(ArcSwap::from_pointee(Radix::new()));
+  /// let base = holder.load_full();
+  /// let next = Arc::new({
+  ///   let mut t = base.txn();
+  ///   t.insert(b"k".as_slice(), 1);
+  ///   t.commit()
+  /// });
+  /// next.publish_to(&base, || {
+  ///   let prev = holder.compare_and_swap(&base, Arc::clone(&next));
+  ///   Arc::ptr_eq(&base, &prev) // true iff our CAS won
+  /// });
+  /// # }
+  /// ```
+  #[inline]
+  pub fn publish_to(&self, base: &Self, swap: impl FnOnce() -> bool) {
+    if swap() {
+      self.notify_changes_since(base);
+    }
+  }
+
+  /// Returns a [`Watch`] that fires when the value at `key` next changes in a
+  /// published version.
+  ///
+  /// One change channel exists per node, so a change to a *descendant* of `key` also
+  /// fires (the watch may wake without `key`'s own value changing); re-read and
+  /// re-arm with a fresh `watch` on the new live version. On an empty trie the watch
+  /// fires when the first value is inserted. The change must be *published* — a
+  /// committed tree fires nothing until its
+  /// [`notify_changes_since`](Radix::notify_changes_since) runs after it wins
+  /// publication. Prefer [`get_watch`](Radix::get_watch) to read and arm on one snapshot.
+  #[inline]
+  pub fn watch<K>(&self, key: &K) -> Watch
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    self.watch_at(key)
+  }
+
+  /// Returns a [`Watch`] that fires when any key under `prefix` next changes in a
+  /// published version (the whole subtree, inclusive of an exact match at `prefix`).
+  #[inline]
+  pub fn watch_prefix<K>(&self, prefix: &K) -> Watch
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    self.watch_at(prefix)
+  }
+
+  /// Read the value at `key` and arm a [`Watch`] for its next change against this one
+  /// immutable snapshot, so the value and the watch are consistent. A version
+  /// published afterward is caught by the `Watch` — or, if it already replaced this
+  /// node, the `Watch` is already-resolved. Prefer this over separate `get` + `watch`.
+  /// See [`watch`](Radix::watch) for the reload-and-re-arm loop.
+  #[inline]
+  pub fn get_watch<K>(&self, key: &K) -> (Option<&V>, Watch)
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    (self.get(key), self.watch_at(key))
+  }
+
+  #[inline]
+  fn watch_at<K>(&self, key: &K) -> Watch
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    let (listener, already) = match self.inner.watch_slot(key.components()) {
+      Some(slot) => slot.listen(),
+      None => self.empty.listen(),
+    };
+    Watch(if already { None } else { Some(listener) })
   }
 }
 

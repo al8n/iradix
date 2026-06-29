@@ -66,6 +66,22 @@ dependency on any of it: it is a plain, reusable container.
   readers `load()` a wait-free snapshot, and a writer opens a `txn()`, `commit()`s
   the next tree, and publishes it with a compare-and-swap retry loop (so a write is
   never silently lost). A worked example ships in [`examples/sync.rs`](examples/sync.rs).
+- **Watch (optional).** With the `watch` feature, observe changes: `watch(key)` /
+  `watch_prefix(prefix)` (or `get_watch(key)`, which reads and arms against one
+  immutable snapshot) return a `Watch` that resolves once a change to the key — or
+  anything in its subtree — is *published* — block with `wait()` or `await`
+  `changed()` (runtime-agnostic, via `event-listener`). Notification is **at
+  publish, not at commit** (the **commit → publish → notify** discipline): `commit`
+  builds the next tree but fires nothing; the *winner* of publication then calls
+  `notify_changes_since(&base)` (or folds both into `publish_to(&base, swap)`), so a
+  tree that loses a CAS is discarded without waking anyone. That notify fires only
+  the events of the nodes the new version replaced (the diff prunes pointer-equal
+  subtrees, scanning the changed paths and their siblings — not the whole tree); a
+  `Watch` is
+  single-use, may
+  over-notify (re-read to confirm), and is meant for a reload-and-re-arm loop. The
+  feature is zero-cost when off. A worked example ships in
+  [`examples/watch.rs`](examples/watch.rs).
 - **`no_std` + `alloc`.** `std` and `alloc` are independent features.
 
 ## Installation
@@ -90,12 +106,14 @@ Runnable, self-contained examples live in [`examples/`](examples/):
 |---|---|
 | [`unsync`](examples/unsync.rs) | `unsync::Radix` — exact lookup; longest-covered-prefix queries (`get_ancestor` / `strict_ancestor`); ordered queries (`minimum` / `maximum` / `range` / `seek_lower_bound`); node-inclusive prefix removal; and `O(1)` snapshot isolation. |
 | [`sync`](examples/sync.rs) | `sync::Radix` — lock-free concurrent reads (`Send + Sync`); a one-shot `txn()` → edit → `commit()` and a batching `Txn` → `commit`; and the lock-free shared-holder pattern with `arc_swap::ArcSwap<sync::Radix<…>>` (load to read; txn → commit → CAS to publish). |
+| [`watch`](examples/watch.rs) | the `watch` feature — `watch` / `watch_prefix` / `get_watch` returning a `Watch`; blocking `wait()` and async `changed().await`; the commit → publish → notify loop over an `ArcSwap` (`publish_to` on a winning CAS, a lost CAS waking nobody, and reload-and-re-arm). Run with `--features watch`. |
 
 Run them with:
 
 ```sh
 cargo run --example unsync
 cargo run --example sync
+cargo run --example watch --features watch
 ```
 
 ## Cargo features
@@ -104,6 +122,7 @@ cargo run --example sync
 |---|---|---|
 | `std` | yes | links the real standard library. |
 | `alloc` | no | `no_std` + heap (the `alloc`-as-`std` alias). Independent of `std`. |
+| `watch` | no | observe key/prefix changes on the `sync` face: `watch` / `watch_prefix` / `get_watch` → `Watch::{wait, changed}`, with publish-time notification via `notify_changes_since` / `publish_to`. Pulls `event-listener`; `wait()` needs `std`. |
 
 `std` and `alloc` are independent (`std` does **not** imply `alloc`). The crate
 always needs the heap, so the bare no-feature configuration does not compile —

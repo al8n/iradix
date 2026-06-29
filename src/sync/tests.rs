@@ -78,7 +78,13 @@ fn sync_radix_is_send_sync() {
 
 #[test]
 fn new_is_empty_and_const() {
+  // `new()` is `const` without `watch`; with `watch` it allocates the shared
+  // empty-position channel, so it is a runtime value there.
+  #[cfg(not(feature = "watch"))]
   const EMPTY: Trie = Radix::new();
+  #[cfg(feature = "watch")]
+  #[allow(non_snake_case)]
+  let EMPTY: Trie = Radix::new();
   assert!(EMPTY.is_empty());
 
   let (t, prev) = one_insert(&EMPTY, b"abc", 1);
@@ -906,4 +912,394 @@ fn delete_prefix_may_clone_a_retained_ancestor_value() {
   assert_eq!(t.get(key(&[1]).as_slice()), Some(&ValBomb(1)));
   assert_eq!(t.get(key(&[1, 2]).as_slice()), Some(&ValBomb(2)));
   assert_eq!(source.len(), 2);
+}
+
+// ----- watch -------------------------------------------------------------------
+
+#[cfg(all(feature = "watch", feature = "std"))]
+mod watch {
+  use super::*;
+  use std::time::Duration;
+
+  // The listener is armed before the writer commits+notifies, so a fired
+  // notification is already delivered by the time we wait — this bound only guards
+  // against a hang.
+  const FIRED: Duration = Duration::from_secs(2);
+  // A short bound for "must stay quiet" assertions.
+  const QUIET: Duration = Duration::from_millis(50);
+
+  #[test]
+  fn watch_key_fires_on_change() {
+    let r0 = build([(b"a", 1)]);
+    let w = r0.watch(b"a".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0); // commit builds; publish-then-notify fires
+    assert!(w.wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn watch_key_async_fires() {
+    let r0 = build([(b"a", 1)]);
+    let w = r0.watch(b"a".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    pollster::block_on(w.changed());
+  }
+
+  #[test]
+  fn noop_commit_does_not_fire() {
+    // An empty no-op commit followed by a notify must stay quiet: nothing changed,
+    // so the diff fires nothing.
+    let r0 = build([(b"a", 1)]);
+    let w = r0.watch(b"a".as_slice());
+    let r1 = r0.txn().commit();
+    r1.notify_changes_since(&r0);
+    assert!(!w.wait_timeout(QUIET));
+  }
+
+  #[test]
+  fn watch_prefix_fires_on_descendant() {
+    let r0 = build([(b"a", 1), (b"b", 2)]);
+    let w = r0.watch_prefix(b"a".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"ax".as_slice(), 9);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(w.wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn watch_prefix_quiet_on_unrelated_subtree() {
+    let r0 = build([(b"a", 1), (b"b", 2)]);
+    let w = r0.watch_prefix(b"a".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"bz".as_slice(), 9);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(!w.wait_timeout(QUIET));
+  }
+
+  #[test]
+  fn split_above_watched_key_stays_quiet() {
+    // Inserting "abd" splits the edge ABOVE "abc" but leaves the node at "abc"
+    // physically shared, so a watch on "abc" must NOT fire (the diff prunes it).
+    let r0 = build([(b"abc", 1)]);
+    let w = r0.watch(b"abc".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"abd".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(!w.wait_timeout(QUIET));
+  }
+
+  #[test]
+  fn watch_after_commit_is_already_ready() {
+    // Sticky-flag guard: after a change is committed AND published (notified),
+    // arming a watch on the now-superseded base must resolve immediately (the node
+    // was already fired), not hang.
+    let r0 = build([(b"a", 1)]);
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0); // fires + stickies r0's "a" node
+    let w = r0.watch(b"a".as_slice()); // armed AFTER the publish
+    assert!(w.wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn merge_above_watched_key_stays_quiet() {
+    // Removing "a" merges the "a" and "bc" edges into "abc" while REUSING the node
+    // at "abc"; a watch on "abc" must NOT fire (only the merged-away "a" changed).
+    let r0 = build([(b"a", 1), (b"abc", 3)]);
+    let w = r0.watch(b"abc".as_slice());
+    let mut t = r0.txn();
+    assert_eq!(t.remove(b"a".as_slice()), Some(1));
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(!w.wait_timeout(QUIET));
+  }
+
+  #[test]
+  fn watch_absent_key_fires_on_creation() {
+    let r0 = build([(b"a", 1)]);
+    let w = r0.watch(b"z".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"z".as_slice(), 9);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(w.wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn watch_empty_tree_fires_on_first_insert() {
+    let r0: Trie = Radix::new();
+    let w = r0.watch(b"a".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 1);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(w.wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn lost_cas_does_not_poison() {
+    // Under lock-free CAS publishing, two txns open from the same base. One wins and
+    // notifies; the other is committed but DISCARDED (a lost CAS) and never notifies.
+    // The losing commit must not poison the keys it touched: a watch on the loser's
+    // key, armed on the base, must stay quiet because that tree was never published.
+    let base = build([(b"a", 10), (b"b", 20)]);
+    let w_b = base.watch(b"b".as_slice()); // armed before any commit
+
+    // The winner: changes "a", publishes (notifies).
+    let mut t1 = base.txn();
+    t1.insert(b"a".as_slice(), 11);
+    let r1 = t1.commit();
+    r1.notify_changes_since(&base);
+
+    // The loser: changes "b", commits, but its CAS lost — so it is dropped and
+    // notify is NEVER called.
+    let mut t2 = base.txn();
+    t2.insert(b"b".as_slice(), 21);
+    let _r2 = t2.commit(); // dropped without notify
+
+    // "b" was only touched by the discarded tree, so its watch must stay quiet.
+    assert!(
+      !w_b.wait_timeout(QUIET),
+      "a lost CAS must not poison the keys it touched"
+    );
+  }
+
+  #[test]
+  fn empty_noop_then_insert_fires() {
+    // Per-epoch empty slot: an empty -> empty no-op commit carries the same empty
+    // slot, so a watch armed on the ORIGINAL empty version still fires when a later
+    // insert is published against the no-op commit.
+    let r0: Trie = Radix::new();
+    let k = b"k".as_slice();
+    let w = r0.watch(k);
+
+    let r1 = r0.txn().commit(); // empty -> empty no-op: r1.empty == r0.empty
+    r1.notify_changes_since(&r0); // still empty -> still empty: fires nothing
+
+    let mut t = r1.txn();
+    t.insert(k, 1);
+    let r2 = t.commit();
+    r2.notify_changes_since(&r1); // empty -> non-empty: fires r1.empty (== r0.empty)
+
+    assert!(w.wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn get_watch_reads_and_arms() {
+    // `get_watch` returns the current value and a Watch armed on the same snapshot;
+    // the Watch fires on the next published change.
+    let r0 = build([(b"a", 1)]);
+    let (value, w) = r0.get_watch(b"a".as_slice());
+    assert_eq!(value, Some(&1));
+
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(w.wait_timeout(FIRED));
+  }
+
+  #[test]
+  #[cfg_attr(miri, ignore = "blocks a real thread on a wall-clock timeout")]
+  fn watch_wakes_a_blocked_thread() {
+    use std::sync::mpsc;
+    let r0 = build([(b"k", 1)]);
+    let w = r0.watch(b"k".as_slice());
+    let (tx, rx) = mpsc::channel();
+    let h = std::thread::spawn(move || {
+      w.wait();
+      tx.send(()).unwrap();
+    });
+    let mut t = r0.txn();
+    t.insert(b"k".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    rx.recv_timeout(FIRED)
+      .expect("watcher thread should have woken");
+    h.join().unwrap();
+  }
+
+  #[test]
+  fn notify_fires_all_changed() {
+    // One publish-time notify must wake EVERY changed key. The diff collects all
+    // changed slots and then fires them, so a single `notify_changes_since` covering
+    // three changed keys wakes all three watches.
+    let base = build([(b"a", 1), (b"b", 2), (b"c", 3)]);
+    let wa = base.watch(b"a".as_slice());
+    let wb = base.watch(b"b".as_slice());
+    let wc = base.watch(b"c".as_slice());
+
+    let mut t = base.txn();
+    t.insert(b"a".as_slice(), 11);
+    t.insert(b"b".as_slice(), 22);
+    t.insert(b"c".as_slice(), 33);
+    let r1 = t.commit();
+    r1.notify_changes_since(&base);
+
+    assert!(wa.wait_timeout(FIRED));
+    assert!(wb.wait_timeout(FIRED));
+    assert!(wc.wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn net_empty_noop_stays_quiet() {
+    // A net-empty txn (insert-then-remove the same key from an empty base) commits
+    // `len == 0`; canonicalizing logical-empty to physical-None keeps it a None ->
+    // None transition, so it publishes nothing and wakes no empty watcher. A LATER
+    // real insert must still wake a watch armed on the ORIGINAL empty version
+    // (per-epoch carry). `wait_timeout` consumes a `Watch`, so arm two on `r0`.
+    let r0: Trie = Radix::new();
+    let k = b"k".as_slice();
+    let w_quiet = r0.watch(k); // checks the net-empty no-op stays quiet
+    let w_fire = r0.watch(k); // checks the later real insert still fires
+
+    // Net-empty no-op: insert then remove k from the empty base.
+    let mut t = r0.txn();
+    t.insert(k, 1);
+    assert_eq!(t.remove(k), Some(1));
+    assert!(t.is_empty());
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0); // None -> None: fires nothing
+    assert!(
+      !w_quiet.wait_timeout(QUIET),
+      "a net-empty no-op publishes nothing and must stay quiet"
+    );
+
+    // A real insert against the (still-empty) r1 must wake the watch armed on r0.
+    let mut t2 = r1.txn();
+    t2.insert(k, 9);
+    let r2 = t2.commit();
+    r2.notify_changes_since(&r1); // empty -> non-empty: fires r1.empty (== r0.empty)
+    assert!(
+      w_fire.wait_timeout(FIRED),
+      "a real insert must wake the watch armed on the original empty version"
+    );
+  }
+
+  // A deep NODE chain: keys "a", "aa", "aaa", ... — each one component longer gives an
+  // N-node chain. These tests isolate the publish-time NOTIFY walk's stack usage:
+  //
+  // - The chain is BUILT on a large-stack thread, because the crate's `insert` (and,
+  //   separately, the chain's recursive `Drop`) recurse on node-depth — neither is
+  //   what is under test here, so both are given headroom.
+  // - The `notify_changes_since` under test runs on a deliberately SMALL stack, where
+  //   a recursive collect walk of this depth would overflow but the iterative one
+  //   (heap `Vec` stack, ~constant native stack) completes. This is the actual guard:
+  //   the notify walk adds no node-depth recursion of its own.
+  // - The deep trees are dropped on a large-stack thread, so the recursive `Drop`
+  //   (a pre-existing structural property, out of scope here) cannot confound the
+  //   small-stack notify assertion.
+  //
+  // N is far deeper than the small notify stack could survive recursively, yet small
+  // enough that the O(N^2) build stays fast.
+  const DEEP_N: usize = 6_000;
+  // Ample headroom for the recursive `insert`/`Drop` on the chain.
+  const BIG_STACK: usize = 64 * 1024 * 1024;
+  // Small enough that a depth-`DEEP_N` recursive collect walk (frames well over 100
+  // bytes each → far more than this) would overflow it; the iterative walk uses the
+  // heap, so it is unaffected.
+  const SMALL_STACK: usize = 128 * 1024;
+
+  fn on_stack<T: Send + 'static>(stack: usize, f: impl FnOnce() -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+      .stack_size(stack)
+      .spawn(f)
+      .expect("spawn helper thread")
+      .join()
+      .expect("helper thread")
+  }
+
+  fn build_deep_chain(n: usize) -> Trie {
+    on_stack(BIG_STACK, move || {
+      let mut t = Radix::<u8, u32>::new().txn();
+      let mut key: Vec<u8> = Vec::with_capacity(n);
+      for i in 0..n {
+        key.push(b'a');
+        t.insert(key.as_slice(), i as u32);
+      }
+      t.commit()
+    })
+  }
+
+  // Drops a deep tree on a large-stack thread, so its recursive `Drop` cannot
+  // overflow the (small) test stack and confound the assertion under test.
+  fn drop_deep(tree: Trie) {
+    on_stack(BIG_STACK, move || drop(tree));
+  }
+
+  #[test]
+  #[cfg_attr(miri, ignore = "deep chain is prohibitively slow under miri")]
+  fn deep_clear_notifies_without_overflow() {
+    // A deep Some -> None transition (clear the whole trie) fires the removed
+    // subtree. `clear`/`commit` do not recurse on depth, so the only node-depth walk
+    // is the NOTIFY collect — run it on a small stack to prove it is iterative.
+    let base = build_deep_chain(DEEP_N);
+    // The root node is the shallowest; an empty-key prefix watch covers the whole
+    // trie and fires on the root's removal.
+    let w = base.watch_prefix(b"".as_slice());
+
+    let mut t = base.txn();
+    t.clear();
+    let r1 = t.commit();
+
+    let base_for_notify = base.clone();
+    // Notify on a SMALL stack: a recursive collect of this depth would overflow here.
+    on_stack(SMALL_STACK, move || {
+      r1.notify_changes_since(&base_for_notify);
+      drop(r1); // r1 is shallow (empty), cheap to drop here
+    });
+
+    assert!(
+      w.wait_timeout(FIRED),
+      "clearing a deep trie must notify without overflowing"
+    );
+    drop_deep(base);
+  }
+
+  #[test]
+  #[cfg_attr(miri, ignore = "deep chain is prohibitively slow under miri")]
+  fn deep_changed_path_notifies() {
+    // Changing the DEEPEST value forces the collect Pair walk all the way down the
+    // chain; a watch on the deepest key must fire, proving the diff descends to full
+    // depth without recursion-driven overflow.
+    let base = build_deep_chain(DEEP_N);
+    let deepest: Vec<u8> = vec![b'a'; DEEP_N];
+    // Arming is iterative (`watch_slot` loops), so it is fine on the small/default stack.
+    let w = base.watch(deepest.as_slice());
+
+    // `insert` recurses on depth, so the deep mutation + commit run on a large stack.
+    let r1 = {
+      let base = base.clone();
+      let deepest = deepest.clone();
+      on_stack(BIG_STACK, move || {
+        let mut t = base.txn();
+        assert_eq!(t.insert(deepest.as_slice(), 7), Some((DEEP_N - 1) as u32));
+        t.commit()
+      })
+    };
+
+    let base_for_notify = base.clone();
+    // Notify on a SMALL stack: the iterative Pair descent to the deepest node must
+    // complete where a recursive one would overflow.
+    let r1 = on_stack(SMALL_STACK, move || {
+      r1.notify_changes_since(&base_for_notify);
+      r1 // hand r1 back so it is dropped on a large stack, not here
+    });
+
+    assert!(
+      w.wait_timeout(FIRED),
+      "changing the deepest value must notify without overflowing"
+    );
+    drop_deep(base);
+    drop_deep(r1);
+  }
 }

@@ -6,6 +6,35 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`watch` feature** (off by default) — observe key/prefix changes across
+  published versions on the `sync` face. `sync::Radix::watch(key)` /
+  `watch_prefix(prefix)` (and `get_watch(key)`, which reads the value and arms a
+  watch against one immutable snapshot) return a `Watch` that resolves once a
+  change to the watched key — or anything in its subtree — is *published* —
+  blocking via `Watch::wait()` (needs `std`) or async via `Watch::changed().await`
+  (works on `no_std + alloc`), runtime-agnostic (built on `event-listener`).
+  Notification is **at publish, not at commit**, following the
+  **commit → publish → notify** discipline: `Txn::commit` builds the next tree but
+  fires nothing; after that tree wins publication (e.g. a successful
+  `ArcSwap::compare_and_swap`) the winner calls `Radix::notify_changes_since(&base)`
+  — or folds the publish and notify into one `Radix::publish_to(&base, swap)`. This
+  is sound under lock-free CAS: a tree that loses the race is discarded without ever
+  notifying, so a lost CAS cannot strand or falsely wake a watcher. A `Watch` is
+  edge-triggered against the snapshot it was armed on and single-use; it **may
+  over-notify** (a descendant or merge change can wake a key watcher — re-read to
+  confirm) and never under-notifies (given non-panicking key comparisons and async
+  wakers — a panic in either during notification is out of scope, like a panicking
+  `Drop`), so use it in a reload-and-re-arm loop to track a key across versions. Each node carries its own change channel; the publish-time
+  diff fires the events of replaced nodes via a pointer-identity walk that prunes
+  pointer-equal subtrees (work scales with the changed paths and their siblings —
+  the replaced nodes plus the direct children scanned at each — not the whole tree);
+  the mutation path is unchanged and a non-`watch` build is byte-identical. Pulls
+  an optional `event-listener` dependency. With `watch`, `Radix::new` is not `const`
+  (it allocates the shared empty-position channel). Worked example:
+  `examples/watch.rs`.
+
 ## [0.1.0]
 
 Initial release: a generic, persistent (copy-on-write) radix trie with structural
