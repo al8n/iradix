@@ -1,6 +1,6 @@
 [package]
 name = "iradix"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 repository = "https://github.com/al8n/iradix"
@@ -13,22 +13,35 @@ keywords = ["radix", "trie", "persistent", "immutable", "copy-on-write"]
 
 [features]
 default = ["std"]
-# `event-listener?/std` is a weak feature: it turns on event-listener's blocking
-# `wait()` only when the `watch` feature has already pulled the dependency in.
 std = ["event-listener?/std"]
 alloc = []
 # Observe key/prefix changes across committed versions. Async `Watch::changed()`
-# works on no_std + alloc; blocking `Watch::wait()` additionally needs `std`.
+# works on no_std + alloc; the blocking `Watch::block_wait*` additionally need `std`.
 watch = ["dep:event-listener"]
+# Runtime-agnostic async `Watch::changed_timeout::<R>()` via agnostic-lite's
+# `RuntimeLite` (re-exported as `iradix::RuntimeLite`). Brings the trait only; name a
+# runtime `R` from agnostic-lite itself. Works on no_std + alloc.
+future = ["dep:agnostic-lite", "watch"]
+tokio = ["future", "agnostic-lite/tokio"]
+smol = ["future", "agnostic-lite/smol"]
+# Back the `sync` face with triomphe's `Arc` (no weak count, more compact) instead of
+# `std::sync::Arc`, via archery's `ArcTK`. Same public API; `no_std + alloc`. No direct
+# triomphe dependency — iradix only names `archery::ArcTK`.
+triomphe = ["archery/triomphe"]
 
 [dependencies]
 archery = { version = "1", default-features = false }
 event-listener = { version = "5", optional = true, default-features = false }
+agnostic-lite = { version = "0.6", optional = true, default-features = false, features = [
+  "time",
+] }
 
 [dev-dependencies]
 arc-swap = "1"
 proptest = "1"
 pollster = "0.4"
+agnostic-lite = { version = "0.6", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -46,5 +59,8 @@ rpath = false
 
 [[example]]
 name = "watch"
-# The example blocks (`wait()`), spawns threads, and uses pollster — all std.
 required-features = ["watch", "std"]
+
+[[example]]
+name = "watch_timeout"
+required-features = ["tokio", "std"]

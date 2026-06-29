@@ -5,6 +5,45 @@ use std::{collections::BTreeMap, vec, vec::Vec};
 
 type Trie = Radix<u8, u32>;
 
+impl<C, V> Radix<C, V>
+where
+  C: Ord,
+{
+  /// Test-only: the true value count by walking the trie.
+  pub(crate) fn count_values(&self) -> usize {
+    self.inner.count_values()
+  }
+
+  /// Test-only: whether the trie is in canonical path-compressed form.
+  pub(crate) fn is_canonical(&self) -> bool {
+    self.inner.is_canonical()
+  }
+
+  /// Test-only: the child subtree pointer for the root edge starting with
+  /// `first`, for structural-sharing (`ptr_eq`) assertions.
+  pub(crate) fn edge_child(
+    &self,
+    first: &C,
+  ) -> Option<archery::SharedPointer<crate::node::Node<ArcP, C, V>, ArcP>> {
+    self.inner.edge_child(first)
+  }
+}
+
+impl<C, V> Txn<C, V>
+where
+  C: Ord,
+{
+  /// Test-only: the true value count by walking the working copy.
+  pub(crate) fn count_values(&self) -> usize {
+    self.working.count_values()
+  }
+
+  /// Test-only: whether the working copy is in canonical path-compressed form.
+  pub(crate) fn is_canonical(&self) -> bool {
+    self.working.is_canonical()
+  }
+}
+
 fn bytes(s: &[u8]) -> Vec<u8> {
   s.to_vec()
 }
@@ -64,7 +103,8 @@ const fn assert_sync<T: Sync>() {}
 
 #[test]
 fn sync_radix_is_send_sync() {
-  // `sync::Radix` and `sync::Txn` (ArcK) must be Send + Sync when their components
+  // `sync::Radix` and `sync::Txn` (Arc-backed, or triomphe `Arc` under the `triomphe`
+  // feature) must be Send + Sync when their components
   // and values are. These are AUTO-derived (no explicit `unsafe impl Send/Sync`).
   assert_send::<Trie>();
   assert_sync::<Trie>();
@@ -952,7 +992,7 @@ mod watch {
     t.insert(b"a".as_slice(), 2);
     let r1 = t.commit();
     r1.notify_changes_since(&r0); // commit builds; publish-then-notify fires
-    assert!(w.wait_timeout(FIRED));
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -974,7 +1014,7 @@ mod watch {
     let w = r0.watch(b"a".as_slice());
     let r1 = r0.txn().commit();
     r1.notify_changes_since(&r0);
-    assert!(!w.wait_timeout(QUIET));
+    assert!(!w.block_wait_timeout(QUIET));
   }
 
   #[test]
@@ -985,7 +1025,7 @@ mod watch {
     t.insert(b"ax".as_slice(), 9);
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
-    assert!(w.wait_timeout(FIRED));
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -996,7 +1036,7 @@ mod watch {
     t.insert(b"bz".as_slice(), 9);
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
-    assert!(!w.wait_timeout(QUIET));
+    assert!(!w.block_wait_timeout(QUIET));
   }
 
   #[test]
@@ -1009,7 +1049,7 @@ mod watch {
     t.insert(b"abd".as_slice(), 2);
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
-    assert!(!w.wait_timeout(QUIET));
+    assert!(!w.block_wait_timeout(QUIET));
   }
 
   #[test]
@@ -1023,7 +1063,7 @@ mod watch {
     let r1 = t.commit();
     r1.notify_changes_since(&r0); // fires + stickies r0's "a" node
     let w = r0.watch(b"a".as_slice()); // armed AFTER the publish
-    assert!(w.wait_timeout(FIRED));
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -1036,7 +1076,7 @@ mod watch {
     assert_eq!(t.remove(b"a".as_slice()), Some(1));
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
-    assert!(!w.wait_timeout(QUIET));
+    assert!(!w.block_wait_timeout(QUIET));
   }
 
   #[test]
@@ -1047,7 +1087,7 @@ mod watch {
     t.insert(b"z".as_slice(), 9);
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
-    assert!(w.wait_timeout(FIRED));
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -1058,7 +1098,7 @@ mod watch {
     t.insert(b"a".as_slice(), 1);
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
-    assert!(w.wait_timeout(FIRED));
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -1084,7 +1124,7 @@ mod watch {
 
     // "b" was only touched by the discarded tree, so its watch must stay quiet.
     assert!(
-      !w_b.wait_timeout(QUIET),
+      !w_b.block_wait_timeout(QUIET),
       "a lost CAS must not poison the keys it touched"
     );
   }
@@ -1106,7 +1146,7 @@ mod watch {
     let r2 = t.commit();
     r2.notify_changes_since(&r1); // empty -> non-empty: fires r1.empty (== r0.empty)
 
-    assert!(w.wait_timeout(FIRED));
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -1121,7 +1161,7 @@ mod watch {
     t.insert(b"a".as_slice(), 2);
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
-    assert!(w.wait_timeout(FIRED));
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -1132,7 +1172,7 @@ mod watch {
     let w = r0.watch(b"k".as_slice());
     let (tx, rx) = mpsc::channel();
     let h = std::thread::spawn(move || {
-      w.wait();
+      w.block_wait();
       tx.send(()).unwrap();
     });
     let mut t = r0.txn();
@@ -1161,9 +1201,9 @@ mod watch {
     let r1 = t.commit();
     r1.notify_changes_since(&base);
 
-    assert!(wa.wait_timeout(FIRED));
-    assert!(wb.wait_timeout(FIRED));
-    assert!(wc.wait_timeout(FIRED));
+    assert!(wa.block_wait_timeout(FIRED));
+    assert!(wb.block_wait_timeout(FIRED));
+    assert!(wc.block_wait_timeout(FIRED));
   }
 
   #[test]
@@ -1186,7 +1226,7 @@ mod watch {
     let r1 = t.commit();
     r1.notify_changes_since(&r0); // None -> None: fires nothing
     assert!(
-      !w_quiet.wait_timeout(QUIET),
+      !w_quiet.block_wait_timeout(QUIET),
       "a net-empty no-op publishes nothing and must stay quiet"
     );
 
@@ -1196,7 +1236,7 @@ mod watch {
     let r2 = t2.commit();
     r2.notify_changes_since(&r1); // empty -> non-empty: fires r1.empty (== r0.empty)
     assert!(
-      w_fire.wait_timeout(FIRED),
+      w_fire.block_wait_timeout(FIRED),
       "a real insert must wake the watch armed on the original empty version"
     );
   }
@@ -1275,7 +1315,7 @@ mod watch {
     });
 
     assert!(
-      w.wait_timeout(FIRED),
+      w.block_wait_timeout(FIRED),
       "clearing a deep trie must notify without overflowing"
     );
     drop_deep(base);
@@ -1312,10 +1352,81 @@ mod watch {
     });
 
     assert!(
-      w.wait_timeout(FIRED),
+      w.block_wait_timeout(FIRED),
       "changing the deepest value must notify without overflowing"
     );
     drop_deep(base);
     drop_deep(r1);
+  }
+}
+
+// Async, runtime-agnostic timeout via agnostic-lite's `RuntimeLite` (here the tokio
+// backend): `changed_timeout` resolves `Ok` on a published change, `Err(Elapsed)`
+// once the budget elapses.
+#[cfg(all(feature = "tokio", feature = "std"))]
+mod async_timeout {
+  use super::*;
+  use crate::TokioRuntime;
+  use std::time::Duration;
+
+  #[tokio::test]
+  async fn changed_timeout_ok_on_change() {
+    let r0 = build([(b"a", 1)]);
+    let w = r0.watch(b"a".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(
+      w.changed_timeout::<TokioRuntime>(Duration::from_secs(2))
+        .await
+        .is_ok()
+    );
+  }
+
+  #[tokio::test]
+  async fn changed_timeout_elapses_when_quiet() {
+    let r0 = build([(b"a", 1)]);
+    let w = r0.watch(b"a".as_slice());
+    // Nothing is published, so the watch never fires and the timeout elapses.
+    assert!(
+      w.changed_timeout::<TokioRuntime>(Duration::from_millis(50))
+        .await
+        .is_err()
+    );
+  }
+
+  #[tokio::test]
+  async fn changed_timeout_ok_when_already_resolved() {
+    // A node replaced before arming yields an already-resolved `Watch`; the timeout
+    // must return `Ok` immediately rather than waiting out the budget.
+    let r0 = build([(b"a", 1)]);
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    let w = r0.watch(b"a".as_slice()); // sticky flag already set → already-resolved
+    assert!(
+      w.changed_timeout::<TokioRuntime>(Duration::from_millis(50))
+        .await
+        .is_ok()
+    );
+  }
+
+  // Building the future must NOT touch the runtime: construct it with no runtime
+  // context active, then drive it inside `block_on`. An eager `R::timeout` would
+  // panic here for tokio.
+  #[test]
+  fn changed_timeout_lazy_constructed_outside_runtime() {
+    let r0 = build([(b"a", 1)]);
+    let w = r0.watch(b"a".as_slice());
+    let mut t = r0.txn();
+    t.insert(b"a".as_slice(), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    // No tokio runtime is active here; constructing the future must not panic.
+    let fut = w.changed_timeout::<TokioRuntime>(Duration::from_secs(2));
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    assert!(rt.block_on(fut).is_ok());
   }
 }

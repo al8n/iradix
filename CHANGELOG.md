@@ -8,13 +8,27 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`triomphe` feature** (off by default) — back the `sync` face with
+  [`triomphe`](https://docs.rs/triomphe)'s `Arc` (a more compact atomic refcount with
+  no weak count) instead of `std::sync::Arc`, through archery's `ArcTK` pointer kind.
+  `sync::Radix` keeps the same public API and `Send + Sync`, so it is a drop-in,
+  opt-in swap; `no_std + alloc`.
+
 - **`watch` feature** (off by default) — observe key/prefix changes across
   published versions on the `sync` face. `sync::Radix::watch(key)` /
   `watch_prefix(prefix)` (and `get_watch(key)`, which reads the value and arms a
   watch against one immutable snapshot) return a `Watch` that resolves once a
   change to the watched key — or anything in its subtree — is *published* —
-  blocking via `Watch::wait()` (needs `std`) or async via `Watch::changed().await`
-  (works on `no_std + alloc`), runtime-agnostic (built on `event-listener`).
+  blocking via `Watch::block_wait()` / `block_wait_timeout()` (need `std`) or async
+  via the named `Watch::changed()` future (works on `no_std + alloc`), built on
+  `event-listener`. The optional **`future` feature** adds a runtime-agnostic
+  async timeout — `Watch::changed_timeout::<R>(d)` (`R` = `TokioRuntime` /
+  `SmolRuntime` / `WasmRuntime` / `EmbassyRuntime` / …) resolving `Ok(())` on change
+  or `Err(Elapsed)` on timeout — while staying `no_std + alloc`. The feature brings
+  the `RuntimeLite` trait, re-exported as `iradix::RuntimeLite`. Convenience `tokio` /
+  `smol` features enable that backend and re-export its runtime (`iradix::TokioRuntime`
+  / `iradix::SmolRuntime`), so a runtime is nameable from iradix alone; other backends
+  are reached through a direct `agnostic-lite` dependency.
   Notification is **at publish, not at commit**, following the
   **commit → publish → notify** discipline: `Txn::commit` builds the next tree but
   fires nothing; after that tree wins publication (e.g. a successful

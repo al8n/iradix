@@ -75,7 +75,7 @@ fn main() {
       })
     };
 
-    w.wait(); // wakes once the writer PUBLISHES a change to config/timeout
+    w.block_wait(); // wakes once the writer PUBLISHES a change to config/timeout
     writer.join().unwrap();
     let after = shared.load().get(b"config/timeout".as_slice()).copied();
     println!("timeout changed -> {after:?}");
@@ -94,7 +94,7 @@ fn main() {
         });
       })
     };
-    w.wait(); // any published change under "config" wakes the prefix watch
+    w.block_wait(); // any published change under "config" wakes the prefix watch
     writer.join().unwrap();
     println!("a change occurred somewhere under config/");
   }
@@ -126,7 +126,7 @@ fn main() {
     });
     // The retries watch never fired (nothing touched retries, and the loser was
     // discarded without notifying). Confirm it is still pending with a tiny wait.
-    let still_pending = !w_retries.wait_timeout(std::time::Duration::from_millis(50));
+    let still_pending = !w_retries.block_wait_timeout(std::time::Duration::from_millis(50));
     assert!(
       still_pending,
       "a lost CAS must not wake an unrelated watcher"
@@ -171,7 +171,7 @@ fn main() {
       if last == Some(12) {
         break;
       }
-      w.wait(); // block until the next publish touches "counter"
+      w.block_wait(); // block until the next publish touches "counter"
     }
     writer.join().unwrap();
     println!("counter reached {:?} via reload-and-re-arm", last);
