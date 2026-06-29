@@ -6,6 +6,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Added
+
+- use `triomphe::Arc` to replace all `std::sync::Arc` usage when `triomphe` feature is enabled
+
+## [0.2.0]
+
 ### Added
 
 - **`triomphe` feature** (off by default) — back the `sync` face with

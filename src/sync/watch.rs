@@ -48,7 +48,7 @@ impl<C, V> Txn<C, V> {
       } else {
         // Some -> None: a new empty epoch begins; nothing armed on the prior
         // (non-empty) version's empty slot, so start fresh.
-        std::sync::Arc::new(WatchSlot::new())
+        Arc::new(WatchSlot::new())
       }
     } else {
       // Non-empty: the empty slot is dormant; carry it so the epoch is preserved if

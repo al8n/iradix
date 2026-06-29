@@ -47,6 +47,12 @@ pub(crate) use archery::ArcK as ArcP;
 #[cfg(feature = "triomphe")]
 pub(crate) use archery::ArcTK as ArcP;
 
+#[cfg(all(feature = "watch", not(feature = "triomphe")))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "watch", feature = "triomphe"))]
+use triomphe::Arc;
+
 #[cfg(feature = "watch")]
 use event_listener::EventListener;
 
@@ -133,7 +139,7 @@ pub struct Radix<C, V> {
   /// [`notify_changes_since`](Radix::notify_changes_since) fires the *base* version's
   /// slot when the trie went from empty to non-empty.
   #[cfg(feature = "watch")]
-  empty: std::sync::Arc<WatchSlot>,
+  empty: Arc<WatchSlot>,
 }
 
 // O(1) clone — no `V: Clone` (the pointer is bumped, values are not touched).
@@ -172,7 +178,7 @@ impl<C, V> Radix<C, V> {
   pub fn new() -> Self {
     Self {
       inner: Root::new(),
-      empty: std::sync::Arc::new(WatchSlot::new()),
+      empty: Arc::new(WatchSlot::new()),
     }
   }
 
@@ -428,7 +434,7 @@ pub struct Txn<C, V> {
   /// The base version's empty-position slot. `commit` carries it into the committed
   /// tree while the empty-epoch is unbroken (see [`Radix::notify_changes_since`]).
   #[cfg(feature = "watch")]
-  empty: std::sync::Arc<WatchSlot>,
+  empty: Arc<WatchSlot>,
 }
 
 impl<C, V> Txn<C, V> {

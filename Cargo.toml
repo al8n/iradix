@@ -1,6 +1,6 @@
 [package]
 name = "iradix"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.95"
 repository = "https://github.com/al8n/iradix"
@@ -24,10 +24,7 @@ watch = ["dep:event-listener"]
 future = ["dep:agnostic-lite", "watch"]
 tokio = ["future", "agnostic-lite/tokio"]
 smol = ["future", "agnostic-lite/smol"]
-# Back the `sync` face with triomphe's `Arc` (no weak count, more compact) instead of
-# `std::sync::Arc`, via archery's `ArcTK`. Same public API; `no_std + alloc`. No direct
-# triomphe dependency — iradix only names `archery::ArcTK`.
-triomphe = ["archery/triomphe"]
+triomphe = ["dep:triomphe", "archery/triomphe"]
 
 [dependencies]
 archery = { version = "1", default-features = false }
@@ -35,6 +32,8 @@ event-listener = { version = "5", optional = true, default-features = false }
 agnostic-lite = { version = "0.6", optional = true, default-features = false, features = [
   "time",
 ] }
+
+triomphe = { version = "0.1", optional = true, default-features = false }
 
 [dev-dependencies]
 arc-swap = "1"
