@@ -63,6 +63,10 @@ jobs:
       # on — otherwise cargo-hack tries the bare no-default-features combo, which
       # cannot compile.
       run: cargo hack clippy --each-feature --features alloc
+    - name: Clippy all features and targets
+      # Covers the agnostic-lite runtime re-exports, the watch_timeout example, and the
+      # tokio-gated tests — combinations `--each-feature` (one feature at a time) misses.
+      run: cargo clippy --all-features --all-targets -- -D warnings
 
   # Run tests on some extra platforms
   cross:
@@ -134,7 +138,9 @@ jobs:
     - name: Run build
       # `alloc` is mandatory; force it on so the powerset skips the
       # uncompilable bare no-default-features combo.
-      run: cargo hack build --feature-powerset --features alloc
+      # `tokio` / `smol` only forward to agnostic-lite backends and gate no iradix
+      # code, so exclude them from the powerset (they are covered by `--each-feature`).
+      run: cargo hack build --feature-powerset --features alloc --exclude-features tokio,smol
   
   test:
     name: test
@@ -165,7 +171,7 @@ jobs:
     - name: Run test
       # `alloc` is mandatory; force it on so the powerset skips the
       # uncompilable bare no-default-features combo.
-      run: cargo hack test --feature-powerset --features alloc
+      run: cargo hack test --feature-powerset --features alloc --exclude-features tokio,smol
   
   sanitizer:
     name: sanitizer

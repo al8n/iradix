@@ -846,7 +846,7 @@ where
 ///   let snap = holder.load_full();              // reload the live version
 ///   let (value, watch) = snap.get_watch(b"k".as_slice()); // read + arm on one snapshot
 ///   # let _ = value;
-///   watch.wait();                               // block until the next published change
+///   watch.block_wait();                         // block until the next published change
 ///   # break;
 /// }
 /// # }
@@ -854,36 +854,148 @@ where
 #[cfg(feature = "watch")]
 pub struct Watch(Option<EventListener>);
 
+/// The future returned by [`Watch::changed`].
+///
+/// Resolves (to `()`) when the watched key or prefix changes in a published
+/// version — immediately if it already has. Runtime-agnostic and `no_std + alloc`:
+/// drive it with any async executor.
+#[cfg(feature = "watch")]
+#[must_use = "futures do nothing unless awaited"]
+pub struct Changed(Option<EventListener>);
+
+#[cfg(feature = "watch")]
+impl core::future::Future for Changed {
+  type Output = ();
+
+  #[inline]
+  fn poll(
+    self: core::pin::Pin<&mut Self>,
+    cx: &mut core::task::Context<'_>,
+  ) -> core::task::Poll<Self::Output> {
+    // `EventListener` is `Unpin`, so the inner listener can be polled through a
+    // plain `&mut` without structural pinning.
+    match &mut self.get_mut().0 {
+      Some(listener) => core::pin::Pin::new(listener).poll(cx),
+      None => core::task::Poll::Ready(()),
+    }
+  }
+}
+
 #[cfg(feature = "watch")]
 impl Watch {
   /// Blocks the current thread until the watched key or prefix changes (returns at
-  /// once if it already has).
+  /// once if it already has). The blocking counterpart to `changed`.
   #[cfg(feature = "std")]
   #[inline]
-  pub fn wait(self) {
+  pub fn block_wait(self) {
     if let Some(listener) = self.0 {
       listener.wait();
     }
   }
 
   /// Blocks until the watched key or prefix changes, or `timeout` elapses. Returns
-  /// `true` if it changed (or already had), `false` on timeout.
+  /// `true` if it changed (or already had), `false` on timeout. The blocking
+  /// counterpart to `changed_timeout`.
   #[cfg(feature = "std")]
   #[inline]
-  pub fn wait_timeout(self, timeout: core::time::Duration) -> bool {
+  pub fn block_wait_timeout(self, timeout: core::time::Duration) -> bool {
     match self.0 {
       None => true,
       Some(listener) => listener.wait_timeout(timeout).is_some(),
     }
   }
 
-  /// Resolves when the watched key or prefix changes (immediately if it already
-  /// has). Runtime-agnostic: drive it with any async executor.
+  /// Returns a future that resolves when the watched key or prefix changes
+  /// (immediately if it already has) — the async counterpart to `block_wait`.
+  /// Runtime-agnostic: drive it with any async executor; works on `no_std + alloc`.
   #[inline]
-  pub async fn changed(self) {
-    if let Some(listener) = self.0 {
-      listener.await;
+  #[must_use = "the returned future does nothing unless awaited"]
+  pub fn changed(self) -> Changed {
+    Changed(self.0)
+  }
+
+  /// Like `changed`, but gives up after `timeout` — a lazy [`ChangedTimeout`] future.
+  ///
+  /// Resolves to `Ok(())` if the watched key or prefix changed in time, or
+  /// `Err(`[`Elapsed`](agnostic_lite::time::Elapsed)`)` on timeout — the async
+  /// counterpart to `block_wait_timeout`. The runtime is chosen with the type
+  /// parameter `R` (e.g. `TokioRuntime`, `SmolRuntime`, `WasmRuntime`,
+  /// `EmbassyRuntime`), so the crate stays runtime-agnostic; works on
+  /// `no_std + alloc` (e.g. the embassy backend). The `agnostic-lite` feature brings
+  /// only the `RuntimeLite` trait; turn on the `tokio`
+  /// or `smol` feature for those backends, or add `agnostic-lite` with another
+  /// backend, then name `R` from `agnostic_lite` (e.g.
+  /// `agnostic_lite::tokio::TokioRuntime`).
+  ///
+  /// ```no_run
+  /// # #[cfg(feature = "tokio")] {
+  /// use core::time::Duration;
+  /// use iradix::{TokioRuntime, sync::Watch};
+  ///
+  /// async fn reload_on_change(watch: Watch) {
+  ///   match watch.changed_timeout::<TokioRuntime>(Duration::from_secs(5)).await {
+  ///     Ok(()) => { /* changed in time — reload the holder and re-arm */ }
+  ///     Err(_elapsed) => { /* timed out — still pending */ }
+  ///   }
+  /// }
+  /// # }
+  /// ```
+  #[cfg(feature = "agnostic-lite")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "agnostic-lite")))]
+  #[inline]
+  pub fn changed_timeout<R>(self, timeout: core::time::Duration) -> ChangedTimeout<R>
+  where
+    R: agnostic_lite::RuntimeLite,
+  {
+    ChangedTimeout {
+      changed: Some(self.changed()),
+      timeout,
+      armed: None,
     }
+  }
+}
+
+/// The future returned by [`Watch::changed_timeout`]. Resolves to `Ok(())` when the
+/// watched key or prefix changes in a published version, or
+/// `Err(`[`Elapsed`](agnostic_lite::time::Elapsed)`)` once the timeout elapses.
+///
+/// Lazy: the runtime timer is built on the first poll (inside the executor), not when
+/// `changed_timeout` is called — so constructing it never touches the runtime, and the
+/// timeout budget starts when the future is first polled.
+#[cfg(feature = "agnostic-lite")]
+#[cfg_attr(docsrs, doc(cfg(feature = "agnostic-lite")))]
+#[must_use = "futures do nothing unless awaited"]
+pub struct ChangedTimeout<R: agnostic_lite::RuntimeLite> {
+  changed: Option<Changed>,
+  timeout: core::time::Duration,
+  // Boxed so this future is `Unpin` even when the runtime's timeout is not, keeping
+  // the crate free of unsafe pin projection; built on first poll for laziness.
+  armed: Option<core::pin::Pin<std::boxed::Box<R::Timeout<Changed>>>>,
+}
+
+#[cfg(feature = "agnostic-lite")]
+impl<R: agnostic_lite::RuntimeLite> core::future::Future for ChangedTimeout<R> {
+  type Output = Result<(), agnostic_lite::time::Elapsed>;
+
+  fn poll(
+    self: core::pin::Pin<&mut Self>,
+    cx: &mut core::task::Context<'_>,
+  ) -> core::task::Poll<Self::Output> {
+    let this = self.get_mut();
+    if let Some(armed) = this.armed.as_mut() {
+      return armed.as_mut().poll(cx);
+    }
+    // First poll: build the runtime timeout now, inside the executor — never at
+    // construction, so it neither touches the runtime early nor starts the budget late.
+    let changed = this
+      .changed
+      .take()
+      .expect("changed is Some until the timeout is armed on first poll");
+    this
+      .armed
+      .insert(std::boxed::Box::pin(R::timeout(this.timeout, changed)))
+      .as_mut()
+      .poll(cx)
   }
 }
 

@@ -69,8 +69,10 @@ dependency on any of it: it is a plain, reusable container.
 - **Watch (optional).** With the `watch` feature, observe changes: `watch(key)` /
   `watch_prefix(prefix)` (or `get_watch(key)`, which reads and arms against one
   immutable snapshot) return a `Watch` that resolves once a change to the key — or
-  anything in its subtree — is *published* — block with `wait()` or `await`
-  `changed()` (runtime-agnostic, via `event-listener`). Notification is **at
+  anything in its subtree — is *published* — block with `block_wait()` /
+  `block_wait_timeout()`, or `await` `changed()` (runtime-agnostic, via
+  `event-listener`; the `agnostic-lite` feature adds the bounded
+  `changed_timeout::<R>()`). Notification is **at
   publish, not at commit** (the **commit → publish → notify** discipline): `commit`
   builds the next tree but fires nothing; the *winner* of publication then calls
   `notify_changes_since(&base)` (or folds both into `publish_to(&base, swap)`), so a
@@ -106,7 +108,7 @@ Runnable, self-contained examples live in [`examples/`](examples/):
 |---|---|
 | [`unsync`](examples/unsync.rs) | `unsync::Radix` — exact lookup; longest-covered-prefix queries (`get_ancestor` / `strict_ancestor`); ordered queries (`minimum` / `maximum` / `range` / `seek_lower_bound`); node-inclusive prefix removal; and `O(1)` snapshot isolation. |
 | [`sync`](examples/sync.rs) | `sync::Radix` — lock-free concurrent reads (`Send + Sync`); a one-shot `txn()` → edit → `commit()` and a batching `Txn` → `commit`; and the lock-free shared-holder pattern with `arc_swap::ArcSwap<sync::Radix<…>>` (load to read; txn → commit → CAS to publish). |
-| [`watch`](examples/watch.rs) | the `watch` feature — `watch` / `watch_prefix` / `get_watch` returning a `Watch`; blocking `wait()` and async `changed().await`; the commit → publish → notify loop over an `ArcSwap` (`publish_to` on a winning CAS, a lost CAS waking nobody, and reload-and-re-arm). Run with `--features watch`. |
+| [`watch`](examples/watch.rs) | the `watch` feature — `watch` / `watch_prefix` / `get_watch` returning a `Watch`; blocking `block_wait()` and async `changed().await`; the commit → publish → notify loop over an `ArcSwap` (`publish_to` on a winning CAS, a lost CAS waking nobody, and reload-and-re-arm). Run with `--features watch`. |
 
 Run them with:
 
@@ -122,7 +124,9 @@ cargo run --example watch --features watch
 |---|---|---|
 | `std` | yes | links the real standard library. |
 | `alloc` | no | `no_std` + heap (the `alloc`-as-`std` alias). Independent of `std`. |
-| `watch` | no | observe key/prefix changes on the `sync` face: `watch` / `watch_prefix` / `get_watch` → `Watch::{wait, changed}`, with publish-time notification via `notify_changes_since` / `publish_to`. Pulls `event-listener`; `wait()` needs `std`. |
+| `watch` | no | observe key/prefix changes on the `sync` face: `watch` / `watch_prefix` / `get_watch` → blocking `Watch::{block_wait, block_wait_timeout}` (need `std`) or async `Watch::changed()` (a named `Changed` future; `no_std + alloc`), with publish-time notification via `notify_changes_since` / `publish_to`. Pulls `event-listener`. |
+| `agnostic-lite` | no | runtime-agnostic async timeout: `Watch::changed_timeout::<R>(d)` (`R` = `TokioRuntime` / `SmolRuntime` / `WasmRuntime` / `EmbassyRuntime` / …) → `Result<(), Elapsed>`. Built on [`agnostic-lite`](https://docs.rs/agnostic-lite); re-exports the `RuntimeLite` trait as `iradix::RuntimeLite`. Implies `watch`; `no_std + alloc`. |
+| `tokio` / `smol` | no | convenience: enable agnostic-lite's tokio / smol backend **and** re-export its runtime as `iradix::TokioRuntime` / `iradix::SmolRuntime` (each implies `agnostic-lite`), so a runtime is nameable from iradix alone. Other backends (`async-io` / `wasm` / `embassy`) — add `agnostic-lite` directly. |
 
 `std` and `alloc` are independent (`std` does **not** imply `alloc`). The crate
 always needs the heap, so the bare no-feature configuration does not compile —
