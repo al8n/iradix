@@ -847,7 +847,9 @@ where
   /// `make_key` is a re-iterable key source called once per pass: a read-only
   /// existence pass first, then (only when present) the mutate pass. Re-yielding a
   /// fresh iterator per pass keeps the no-copy-on-absent guarantee while avoiding a
-  /// whole-key `Vec` — both passes walk the key lazily.
+  /// whole-key `Vec` — both passes walk the key lazily. Correctness relies on the
+  /// [`RadixKey`](crate::RadixKey) determinism contract (each call yields the same
+  /// components); the public wrappers pass `|| key.components()`.
   pub(crate) fn remove<F, I>(&mut self, make_key: F) -> Option<V>
   where
     F: Fn() -> I,
