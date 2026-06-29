@@ -41,8 +41,8 @@ use crate::{
 ///
 /// Keys decompose into [`Component`](RadixKey::Component)s via [`RadixKey`]; the
 /// trie is parameterized over the component type `C` and the value type `V`, and
-/// uses [`Arc`](std::sync::Arc) pointers internally. It is `Send + Sync` whenever
-/// both `C` and `V` are (auto-derived; the crate declares no explicit `unsafe impl`).
+/// uses [`Arc`](std::sync::Arc) pointers internally, so it is `Send + Sync`
+/// whenever both `C` and `V` are (auto-derived — no `unsafe impl`).
 ///
 /// A `Radix` never mutates in place. A [`clone`](Clone::clone) is O(1) and shares
 /// all structure with the original; a committed edit produces a *new* tree that
@@ -51,14 +51,9 @@ use crate::{
 /// isolation automatic.
 ///
 /// Mutation is via a [`Txn`]: open one with [`txn`](Radix::txn), edit the owned
-/// working copy with its `&mut self` mutators, then [`commit`](Txn::commit) into the
-/// next tree. A one-shot edit is just `let mut t = r.txn(); t.insert(...); let r =
-/// t.commit();`.
-///
-/// `iradix` ships no built-in concurrent holder: to publish versions atomically to
-/// shared readers, hold the snapshot yourself — wrap it in an
-/// `arc_swap::ArcSwap<Radix<…>>` (load to read; txn → commit → CAS to publish).
-/// See the module docs and `examples/sync.rs`.
+/// working copy, then [`commit`](Txn::commit) into the next tree (see the example
+/// below). To publish versions to shared readers, hold the snapshot in an `ArcSwap`
+/// yourself — see the [module docs](crate::sync#lock-free-sharing).
 ///
 /// # Examples
 ///
