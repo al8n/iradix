@@ -870,9 +870,8 @@ where
 
   /// Removes every *strict* descendant of the components yielded by `make_key`
   /// (the value at the key, if any, is kept), returning the number of values
-  /// removed. Never clones a `V`. `make_key` is a re-iterable key source called
-  /// once per pass (existence, then unlink), keeping no-copy-on-absent without a
-  /// whole-key `Vec`.
+  /// removed. Never clones a `V`. Two-pass over `make_key` (existence, then
+  /// unlink); see [`Root::remove`] for the contract.
   pub(crate) fn remove_descendants<F, I>(&mut self, make_key: F) -> usize
   where
     F: Fn() -> I,
@@ -895,9 +894,8 @@ where
 
   /// Removes every *strict* descendant of the components yielded by `make_key` and
   /// returns their values (the value at the key, if any, is kept). Clones values
-  /// out before unlinking. `make_key` is a re-iterable key source called once per
-  /// pass (capture, then unlink), keeping no-copy-on-absent without a whole-key
-  /// `Vec`.
+  /// out before unlinking. Two-pass over `make_key` (capture, then unlink); see
+  /// [`Root::remove`] for the contract.
   pub(crate) fn drain_descendants<F, I>(&mut self, make_key: F) -> Vec<V>
   where
     F: Fn() -> I,
@@ -924,9 +922,8 @@ where
   /// Removes the value at the components yielded by `make_key` *and* every strict
   /// descendant (node-inclusive), returning the number of values removed. Clones no
   /// *removed* value — only the copy-on-write path to the key is duplicated, exactly
-  /// like every other mutator. `make_key` is a re-iterable key source called once
-  /// per pass (existence, then unlink), keeping no-copy-on-absent without a
-  /// whole-key `Vec`.
+  /// like every other mutator. Two-pass over `make_key` (existence, then unlink);
+  /// see [`Root::remove`] for the contract.
   pub(crate) fn delete_prefix<F, I>(&mut self, make_key: F) -> usize
   where
     F: Fn() -> I,
@@ -962,8 +959,8 @@ where
   /// Removes the value at the components yielded by `make_key` *and* every strict
   /// descendant (node-inclusive) and returns their values in ascending key order
   /// (the value at the key itself, if any, first). Clones values out before
-  /// unlinking. `make_key` is a re-iterable key source called once per pass
-  /// (capture, then unlink), keeping no-copy-on-absent without a whole-key `Vec`.
+  /// unlinking. Two-pass over `make_key` (capture, then unlink); see
+  /// [`Root::remove`] for the contract.
   pub(crate) fn drain_prefix<F, I>(&mut self, make_key: F) -> Vec<V>
   where
     F: Fn() -> I,
