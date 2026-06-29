@@ -18,7 +18,9 @@ sharing — bring-your-own-key, `no_std + alloc`, parameterized over `Rc` / `Arc
   `[u8]` walk borrows `&u8` and copies nothing). Foundational impls for `[C]`,
   `Vec<C>`, and `str` (char-addressed). An *unsized* component (e.g.
   `Component = str`) is not supported — use an owned component (`String`, or a
-  cheap-clone newtype segment).
+  cheap-clone newtype segment). `components()` must be deterministic (the same
+  sequence on every call) — the trie may walk a key more than once per operation; a
+  non-deterministic impl is a logic error, like an inconsistent `Ord`/`Hash`.
 
 ### Structure
 

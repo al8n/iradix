@@ -19,6 +19,19 @@ use std::vec::Vec;
 /// [`Borrow`](core::borrow::Borrow) bound via the blanket `impl Borrow<T> for T`,
 /// and a read still allocates nothing.
 ///
+/// # Determinism
+///
+/// [`components`](RadixKey::components) **must yield the same sequence on every
+/// call** for a given key. A single mutating operation may walk the key more than
+/// once — for example, `remove` checks existence first so that removing an absent
+/// key copies nothing, then walks again to unlink. An implementation whose
+/// `components` varies between calls (e.g. via interior mutability) is a logic
+/// error: it can read a different key than it writes, producing wrong results.
+/// This is not undefined behavior — it is the same class of contract as an
+/// inconsistent [`Ord`](core::cmp::Ord) or [`Hash`](core::hash::Hash) for the
+/// standard collections. The foundational impls (`[C]`, `Vec<C>`, `str`) satisfy
+/// it trivially.
+///
 /// # Examples
 ///
 /// ```
@@ -39,6 +52,9 @@ pub trait RadixKey {
   ///
   /// Each item borrows as a [`Self::Component`]; an implementation may yield
   /// borrowed sub-slices (zero-copy) or owned components by value.
+  ///
+  /// Must be deterministic — every call yields the same sequence (see the trait's
+  /// *Determinism* section); the trie may walk a key more than once per operation.
   fn components(&self) -> impl Iterator<Item: Borrow<Self::Component>> + '_;
 }
 
