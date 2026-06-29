@@ -24,6 +24,8 @@ on:
 jobs:
   loc:
     runs-on: ubuntu-latest
+    env:
+      GIST_PAT: ${{ secrets.GIST_PAT }}
     steps:
       - uses: actions/checkout@v7
 
@@ -41,6 +43,9 @@ jobs:
         run: |
           tokeit
       - name: Upload total loc to GitHub Gist
+        # Skip when no token is configured so the job still passes; uploads
+        # resume automatically once GIST_PAT is set.
+        if: ${{ env.GIST_PAT != '' }}
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GIST_PAT }}

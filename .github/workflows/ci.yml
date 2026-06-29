@@ -59,7 +59,10 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Apply clippy lints
-      run: cargo hack clippy --each-feature
+      # `alloc` is mandatory (the trie's core types need the heap), so force it
+      # on — otherwise cargo-hack tries the bare no-default-features combo, which
+      # cannot compile.
+      run: cargo hack clippy --each-feature --features alloc
 
   # Run tests on some extra platforms
   cross:
@@ -129,7 +132,9 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run build
-      run: cargo hack build --feature-powerset
+      # `alloc` is mandatory; force it on so the powerset skips the
+      # uncompilable bare no-default-features combo.
+      run: cargo hack build --feature-powerset --features alloc
   
   test:
     name: test
@@ -158,7 +163,9 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run test
-      run: cargo hack test --feature-powerset
+      # `alloc` is mandatory; force it on so the powerset skips the
+      # uncompilable bare no-default-features combo.
+      run: cargo hack test --feature-powerset --features alloc
   
   sanitizer:
     name: sanitizer
@@ -257,6 +264,8 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     needs:
       - rustfmt
       - clippy
@@ -287,6 +296,9 @@ jobs:
           RUSTFLAGS: "--cfg tarpaulin"
         run: cargo tarpaulin --all-features --engine llvm --run-types lib --run-types tests --run-types doctests --workspace --out xml
       - name: Upload to codecov.io
+        # Skip when no token is configured so the job still passes; uploads
+        # resume automatically once CODECOV_TOKEN is set.
+        if: ${{ env.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
