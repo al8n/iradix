@@ -13,15 +13,22 @@ keywords = ["radix", "trie", "persistent", "immutable", "copy-on-write"]
 
 [features]
 default = ["std"]
-std = []
+# `event-listener?/std` is a weak feature: it turns on event-listener's blocking
+# `wait()` only when the `watch` feature has already pulled the dependency in.
+std = ["event-listener?/std"]
 alloc = []
+# Observe key/prefix changes across committed versions. Async `Watch::changed()`
+# works on no_std + alloc; blocking `Watch::wait()` additionally needs `std`.
+watch = ["dep:event-listener"]
 
 [dependencies]
 archery = { version = "1", default-features = false }
+event-listener = { version = "5", optional = true, default-features = false }
 
 [dev-dependencies]
 arc-swap = "1"
 proptest = "1"
+pollster = "0.4"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -36,3 +43,8 @@ incremental = false
 debug-assertions = false
 overflow-checks = false
 rpath = false
+
+[[example]]
+name = "watch"
+# The example blocks (`wait()`), spawns threads, and uses pollster — all std.
+required-features = ["watch", "std"]
