@@ -311,6 +311,37 @@ fn str_and_vec_char_keys_alias() {
   assert_eq!(t2.get("ab"), Some(&5));
 }
 
+#[test]
+fn integer_keys_iterate_in_numeric_order() {
+  // Big-endian + sign-bit-flip byte keying makes the trie's component order match
+  // numeric order, negatives included.
+  let mut t: Radix<u8, i32> = Radix::new();
+  for k in [5i32, -3, 0, 100, -1, i32::MIN, i32::MAX] {
+    t.insert(&k, k);
+  }
+  let ordered: Vec<i32> = t.values().copied().collect();
+  assert_eq!(ordered, vec![i32::MIN, -3, -1, 0, 5, 100, i32::MAX]);
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn path_keys_use_component_ancestors() {
+  use std::path::Path;
+
+  let mut t: Radix<std::ffi::OsString, u32> = Radix::new();
+  t.insert(Path::new("a/b"), 1);
+  t.insert(Path::new("a/b/c"), 2);
+  t.insert(Path::new("a/bc"), 3);
+
+  // Component keying: "a/b" is the strict ancestor of "a/b/c"…
+  assert_eq!(t.strict_ancestor(Path::new("a/b/c")), Some(&1));
+  assert_eq!(t.get_ancestor(Path::new("a/b/c")), Some(&2)); // inclusive: exact
+  // …but "a/b" is NOT an ancestor of "a/bc" (byte keying would wrongly match).
+  assert_eq!(t.strict_ancestor(Path::new("a/bc")), None);
+  // redundant separators normalize to the same key.
+  assert_eq!(t.get(Path::new("a//b/./c")), Some(&2));
+}
+
 // ----- snapshot isolation & structural sharing ----------------------------
 
 #[test]

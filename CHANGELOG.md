@@ -13,6 +13,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - use `triomphe::Arc` to replace all `std::sync::Arc` usage when `triomphe` feature is enabled
 - add descending ordered queries `range_rev` / `seek_reverse_lower_bound` and node-inclusive `descendants_inclusive` (go-immutable-radix parity)
 - add key-carrying `(key, value)` walks `walk_prefix` / `walk_prefix_strict` / `walk_path` (each with a `_rev` form) — go's `WalkPrefix` / `WalkPath`
+- add `RadixKey` impls for `String`, `Box<[C]>`, `[C; N]`, `CStr` / `CString`, the integer types (`u8`…`u128` / `i8`…`i128`, big-endian order-preserving within one integer type — numeric tries must be homogeneous), byte-keyed `OsStr` / `OsString`, and component-keyed `Path` / `PathBuf`
 
 ## [0.2.0]
 
@@ -67,8 +68,9 @@ sharing — bring-your-own-key, `no_std + alloc`, parameterized over `Rc` / `Arc
 ### Bring-your-own-key
 
 - `RadixKey` trait. `Component` is the owned, `Sized` element the trie stores;
-  `components()` yields anything `Borrow<Component>`, so lookups are zero-alloc (a
-  `[u8]` walk borrows `&u8` and copies nothing). Foundational impls for `[C]`,
+  `components()` yields anything `Borrow<Component>`, so a lookup walks its key
+  lazily — allocation-free for these foundational impls (a `[u8]` walk borrows `&u8`
+  and copies nothing; a key type's own `components()` may allocate). Foundational impls for `[C]`,
   `Vec<C>`, and `str` (char-addressed). An *unsized* component (e.g.
   `Component = str`) is not supported — use an owned component (`String`, or a
   cheap-clone newtype segment). `components()` must be deterministic (the same
@@ -122,11 +124,12 @@ The same set on every write face — `&mut self` on `unsync::Radix` and `sync::T
   Removal clones no *removed* value; only retained values on the copied
   copy-on-write path may be cloned, as in every mutator.
 
-  Every mutator is allocation-free with respect to the key: `insert` / `remove` /
-  `remove_descendants` / `drain_descendants` / `delete_prefix` / `drain_prefix`
-  walk the key lazily over its components (iterator-native, no per-call key `Vec`),
-  while still preserving the no-copy-on-absent guarantee — an absent key or prefix
-  triggers no copy-on-write at all.
+  Every mutator traverses the key lazily rather than pre-materializing a whole-key
+  `Vec`. The removal mutators — `remove` / `remove_descendants` / `drain_descendants` /
+  `delete_prefix` / `drain_prefix` — allocate nothing for the key; `insert` walks
+  lazily too but stores the unmatched suffix as an owned edge label (a `Box<[C]>`), as
+  any radix insert must. All preserve the no-copy-on-absent guarantee — an absent key
+  or prefix triggers no copy-on-write at all.
 
 ### Concurrency & `no_std`
 

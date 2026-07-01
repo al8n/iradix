@@ -32,13 +32,23 @@ dependency on any of it: it is a plain, reusable container.
 ## Highlights
 
 - **Bring-your-own-key.** [`RadixKey`] decomposes a key into components; its
-  `Component` is the owned, `Sized` element the trie stores (`[u8]` → `u8`, `str` →
-  `char`; foundational impls for `[C]`, `Vec<C>`, and `str`). Lookups stay
-  zero-alloc — `components()` yields anything `Borrow<Component>`, so a slice walk
-  borrows `&C` and copies nothing; the component bounds are just `C: Ord` (reads)
-  and `C: Ord + Clone` (mutators). A `str` key and a `Vec<char>` key over the same
-  characters address the same path. An *unsized* component (e.g. `Component = str`)
-  is not supported — use an owned component (`String`, or a cheap-clone newtype).
+  `Component` is the owned, `Sized` element the trie stores. Each type keys on its
+  natural element: sequences `[C]` / `Vec<C>` / `Box<[C]>` / `[C; N]` → `C`; `str` /
+  `String` → `char`; byte-addressed `OsStr` / `OsString` / `CStr` / `CString` and the
+  integer types (`u8`…`u128`, `i8`…`i128`, big-endian and order-preserving within one
+  integer type — a numeric trie must be homogeneous) → `u8`;
+  and `Path` / `PathBuf` → `OsString` **path components** (so `/a/b` is an ancestor of
+  `/a/b/c` but not `/a/bc`). Decomposing a key into its components — what
+  `components()` does on every lookup/insert — allocates nothing for every built-in
+  key except `Path` / `PathBuf` (a slice key borrows `&C`; `Path` allocates one
+  `OsString` per component). An operation's other costs are separate: `insert`
+  allocates trie nodes, and the ordered/iterator reads (`range`, `values`, `walk_*`, …)
+  allocate traversal state and `Vec` keys where they return keys. The component bounds
+  are just
+  `C: Ord` (reads) and `C: Ord + Clone` (mutators). A `str` key and a `Vec<char>`
+  key over the same characters address the same path. An *unsized* component (e.g.
+  `Component = str`) is not supported — use an owned component (`String`, or a
+  cheap-clone newtype).
 - **Persistent + structurally shared.** A shared internal `node` core mutates in
   place at refcount 1 and copies only when a node is shared, so old snapshots are
   never disturbed. The reference-counting pointer is an internal detail.
