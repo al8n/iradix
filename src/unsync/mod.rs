@@ -93,7 +93,9 @@ where
 {
   /// Returns a reference to the value stored at exactly `key`, if any.
   ///
-  /// Zero allocation: the key is walked lazily over its components.
+  /// The key is walked lazily over its components; the walk allocates nothing unless
+  /// the key type's `components` does — e.g. a `Path` key allocates one `OsString`
+  /// per component (see the [`RadixKey`] Allocation section).
   #[inline]
   pub fn get<K>(&self, key: &K) -> Option<&V>
   where
