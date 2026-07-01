@@ -11,6 +11,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - use `triomphe::Arc` to replace all `std::sync::Arc` usage when `triomphe` feature is enabled
+- add descending ordered queries `range_rev` / `seek_reverse_lower_bound` and node-inclusive `descendants_inclusive` (go-immutable-radix parity)
+- add key-carrying `(key, value)` walks `walk_prefix` / `walk_prefix_strict` / `walk_path` (each with a `_rev` form) — go's `WalkPrefix` / `WalkPath`
 
 ## [0.2.0]
 

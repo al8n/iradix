@@ -57,9 +57,12 @@ dependency on any of it: it is a plain, reusable container.
   / `drain_descendants` (strict) or `delete_prefix` / `drain_prefix`
   (node-inclusive).
 - **Ordered queries.** `minimum` / `maximum`, forward and reverse value iteration
-  (`values` / `values_rev`, `descendants` / `descendants_rev`), and key-ordered
-  `range` (any `RangeBounds`) / `seek_lower_bound` cursors that yield reconstructed
-  `(key, value)` pairs.
+  (`values` / `values_rev`, `descendants` / `descendants_rev`, plus node-inclusive
+  `descendants_inclusive`), and key-ordered `(key, value)` cursors in both
+  directions: `range` (any `RangeBounds`) / `seek_lower_bound` ascending, and
+  `range_rev` / `seek_reverse_lower_bound` descending. Key-carrying prefix and path
+  walks — `walk_prefix` / `walk_prefix_strict` and `walk_path` (each with a `_rev`
+  form) — mirror go-immutable-radix's `WalkPrefix` / `WalkPath`.
 - **Bring-your-own concurrency.** `iradix` ships no built-in concurrent holder.
   [`sync::Radix`] is an immutable, `O(1)`-clone tree, so you publish new versions
   yourself — the lock-free pattern wraps it in `arc_swap::ArcSwap<sync::Radix<…>>`:

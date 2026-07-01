@@ -63,7 +63,7 @@ use event_listener::Listener;
 
 use crate::{
   RadixKey,
-  node::{RangeIter, RevValueIter, Root, SliceIter, ValueIter},
+  node::{RangeIter, RevRangeIter, RevValueIter, Root, SliceIter, ValueIter},
 };
 
 #[cfg(feature = "watch")]
@@ -376,6 +376,138 @@ where
       inner: self.inner.range(Bound::Included(lower), Bound::Unbounded),
     }
   }
+
+  /// Iterates references to the values of every descendant of `key`, **including
+  /// the value at `key` itself** — the node-inclusive form of
+  /// [`descendants`](Radix::descendants) (go-immutable-radix's `WalkPrefix`).
+  #[inline]
+  #[must_use]
+  pub fn descendants_inclusive<K>(&self, key: &K) -> Descendants<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    Descendants {
+      inner: self.inner.descendants_inclusive(key.components()),
+    }
+  }
+
+  /// Iterates `(key, value)` for every entry whose key lies within `range`, in
+  /// **descending** key order — the reverse of [`range`](Radix::range).
+  #[inline]
+  #[must_use]
+  pub fn range_rev<K, R>(&self, range: R) -> RevRange<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    R: RangeBounds<K>,
+    C: Clone,
+  {
+    RevRange {
+      inner: self.inner.rev_range(
+        materialize_bound(range.start_bound()),
+        materialize_bound(range.end_bound()),
+      ),
+    }
+  }
+
+  /// Returns a **reverse** cursor positioned at the last entry whose key is
+  /// `<= key`, then descending (go-immutable-radix's `SeekReverseLowerBound`).
+  /// Equivalent to [`range_rev(..=key)`](Radix::range_rev), exposed under its own
+  /// name for parity with [`seek_lower_bound`](Radix::seek_lower_bound).
+  #[inline]
+  #[must_use]
+  pub fn seek_reverse_lower_bound<K>(&self, key: &K) -> RevRange<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    let upper: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
+    RevRange {
+      inner: self
+        .inner
+        .rev_range(Bound::Unbounded, Bound::Included(upper)),
+    }
+  }
+
+  /// Iterates `(key, value)` for every entry having `prefix` as a prefix, **including
+  /// the value at `prefix` itself**, ascending — go-immutable-radix's `WalkPrefix`;
+  /// the key-carrying form of [`descendants_inclusive`](Radix::descendants_inclusive).
+  #[inline]
+  #[must_use]
+  pub fn walk_prefix<K>(&self, prefix: &K) -> Range<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    Range {
+      inner: self.inner.prefix_entries(prefix.components(), true),
+    }
+  }
+
+  /// The descending form of [`walk_prefix`](Radix::walk_prefix).
+  #[inline]
+  #[must_use]
+  pub fn walk_prefix_rev<K>(&self, prefix: &K) -> RevRange<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    RevRange {
+      inner: self.inner.prefix_entries_rev(prefix.components(), true),
+    }
+  }
+
+  /// Iterates `(key, value)` for every *strict* descendant of `prefix`, ascending —
+  /// the key-carrying form of [`descendants`](Radix::descendants).
+  #[inline]
+  #[must_use]
+  pub fn walk_prefix_strict<K>(&self, prefix: &K) -> Range<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    Range {
+      inner: self.inner.prefix_entries(prefix.components(), false),
+    }
+  }
+
+  /// The descending form of [`walk_prefix_strict`](Radix::walk_prefix_strict).
+  #[inline]
+  #[must_use]
+  pub fn walk_prefix_strict_rev<K>(&self, prefix: &K) -> RevRange<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    RevRange {
+      inner: self.inner.prefix_entries_rev(prefix.components(), false),
+    }
+  }
+
+  /// Iterates `(key, value)` for every stored key that is a prefix of `key`
+  /// (inclusive), in root-to-`key` order — go-immutable-radix's `WalkPath`; the
+  /// key-carrying form of [`ancestors`](Radix::ancestors).
+  #[inline]
+  #[must_use]
+  pub fn walk_path<K>(&self, key: &K) -> PathEntries<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    PathEntries::new(self.inner.ancestor_entries(key.components()))
+  }
+
+  /// The reverse (`key`-to-root) form of [`walk_path`](Radix::walk_path).
+  #[inline]
+  #[must_use]
+  pub fn walk_path_rev<K>(&self, key: &K) -> PathEntries<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    let mut entries = self.inner.ancestor_entries(key.components());
+    entries.reverse();
+    PathEntries::new(entries)
+  }
 }
 
 // Builds a tree from `(key, value)` pairs whose key is a `Vec` of components,
@@ -558,6 +690,58 @@ where
       inner: self.working.descendants(key.components()),
     }
   }
+
+  /// Iterates references to the values of every descendant of `key`, **including
+  /// the value at `key` itself** — the node-inclusive form of
+  /// [`descendants`](Txn::descendants).
+  #[inline]
+  pub fn descendants_inclusive<K>(&self, key: &K) -> Descendants<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+  {
+    Descendants {
+      inner: self.working.descendants_inclusive(key.components()),
+    }
+  }
+
+  /// Iterates `(key, value)` for every entry having `prefix` as a prefix,
+  /// **inclusive** of the value at `prefix` (go-immutable-radix's `WalkPrefix`).
+  #[inline]
+  #[must_use]
+  pub fn walk_prefix<K>(&self, prefix: &K) -> Range<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    Range {
+      inner: self.working.prefix_entries(prefix.components(), true),
+    }
+  }
+
+  /// Iterates `(key, value)` for every *strict* descendant of `prefix`, ascending.
+  #[inline]
+  #[must_use]
+  pub fn walk_prefix_strict<K>(&self, prefix: &K) -> Range<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    Range {
+      inner: self.working.prefix_entries(prefix.components(), false),
+    }
+  }
+
+  /// Iterates `(key, value)` for every stored key that is a prefix of `key`
+  /// (inclusive), in root-to-`key` order (go-immutable-radix's `WalkPath`).
+  #[inline]
+  #[must_use]
+  pub fn walk_path<K>(&self, key: &K) -> PathEntries<'_, C, V>
+  where
+    K: RadixKey<Component = C> + ?Sized,
+    C: Clone,
+  {
+    PathEntries::new(self.working.ancestor_entries(key.components()))
+  }
 }
 
 impl<C, V> Txn<C, V>
@@ -658,9 +842,11 @@ impl<'a, V> Iterator for Ancestors<'a, V> {
   }
 }
 
-/// Iterator over references to the values of `key`'s strict descendants.
+/// Iterator over references to the values of `key`'s descendants — strict, or
+/// node-inclusive.
 ///
-/// Created by [`Radix::descendants`].
+/// Created by [`Radix::descendants`] (strict) and
+/// [`Radix::descendants_inclusive`] (node-inclusive).
 pub struct Descendants<'a, C, V> {
   inner: ValueIter<'a, ArcP, C, V>,
 }
@@ -719,6 +905,56 @@ where
   C: Ord + Clone,
 {
   type Item = (Vec<C>, &'a V);
+
+  #[inline]
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next()
+  }
+}
+
+/// Iterator over `(key, value)` entries within a range, in **descending** key order
+/// (the reverse of [`Range`]).
+///
+/// Created by [`Radix::range_rev`] and [`Radix::seek_reverse_lower_bound`].
+pub struct RevRange<'a, C, V> {
+  inner: RevRangeIter<'a, ArcP, C, V>,
+}
+
+impl<'a, C, V> Iterator for RevRange<'a, C, V>
+where
+  C: Ord + Clone,
+{
+  type Item = (Vec<C>, &'a V);
+
+  #[inline]
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next()
+  }
+}
+
+/// The owned `(key, value)` entry a [`PathEntries`] iterator yields.
+type PathEntry<'a, C, V> = (Vec<C>, &'a V);
+
+/// Iterator over `(key, value)` entries along a root-to-`key` path — the stored keys
+/// that are prefixes of the query key.
+///
+/// Created by [`Radix::walk_path`] (ascending) and [`Radix::walk_path_rev`]
+/// (descending).
+pub struct PathEntries<'a, C, V> {
+  inner: std::vec::IntoIter<PathEntry<'a, C, V>>,
+}
+
+impl<'a, C, V> PathEntries<'a, C, V> {
+  #[inline]
+  fn new(entries: Vec<PathEntry<'a, C, V>>) -> Self {
+    Self {
+      inner: entries.into_iter(),
+    }
+  }
+}
+
+impl<'a, C, V> Iterator for PathEntries<'a, C, V> {
+  type Item = PathEntry<'a, C, V>;
 
   #[inline]
   fn next(&mut self) -> Option<Self::Item> {

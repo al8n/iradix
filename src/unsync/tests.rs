@@ -1361,6 +1361,208 @@ fn seek_lower_bound_positions() {
   assert_eq!(seek(b"e"), vec![5]);
 }
 
+#[test]
+fn reverse_seek_lower_bound_positions() {
+  // The descending mirror of `seek_lower_bound_positions` (go's
+  // `SeekReverseLowerBound`): keys `<= search`, largest first.
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"c"), 3);
+  t.insert(&bytes(b"e"), 5);
+  let rseek = |k: &[u8]| -> Vec<u32> { t.seek_reverse_lower_bound(k).map(|(_, v)| *v).collect() };
+  assert_eq!(rseek(b"c"), vec![3, 1]); // exact stored key
+  assert_eq!(rseek(b"d"), vec![3, 1]); // between two keys
+  assert_eq!(rseek(b"e"), vec![5, 3, 1]); // last key
+  assert_eq!(rseek(b"z"), vec![5, 3, 1]); // after all keys
+  assert_eq!(rseek(b"a"), vec![1]); // first key
+  assert_eq!(rseek(b""), vec![]); // the empty key is the smallest — nothing is below it
+  assert_eq!(rseek(b"`"), vec![]); // below every key
+
+  // Mixed-length keys exercise the mid-edge / shared-prefix seeding.
+  let mut m: Trie = Radix::new();
+  for (i, k) in [
+    b"a1".as_slice(),
+    b"abc",
+    b"barbazboo",
+    b"f",
+    b"foo",
+    b"found",
+    b"zap",
+    b"zip",
+  ]
+  .into_iter()
+  .enumerate()
+  {
+    m.insert(k, i as u32);
+  }
+  let keys = |k: &[u8]| -> Vec<Vec<u8>> { m.seek_reverse_lower_bound(k).map(|(k, _)| k).collect() };
+  // "f" is a prefix of "foo"/"found": keys <= "foo" excludes "found"/"zap"/"zip".
+  assert_eq!(
+    keys(b"foo"),
+    vec![
+      b"foo".to_vec(),
+      b"f".to_vec(),
+      b"barbazboo".to_vec(),
+      b"abc".to_vec(),
+      b"a1".to_vec()
+    ]
+  );
+  // "fom" < "foo": both "foo" and "found" drop out; "f" (a proper prefix) stays.
+  assert_eq!(
+    keys(b"fom"),
+    vec![
+      b"f".to_vec(),
+      b"barbazboo".to_vec(),
+      b"abc".to_vec(),
+      b"a1".to_vec()
+    ]
+  );
+  // above everything: the full set, descending.
+  assert_eq!(
+    keys(b"zzz"),
+    vec![
+      b"zip".to_vec(),
+      b"zap".to_vec(),
+      b"found".to_vec(),
+      b"foo".to_vec(),
+      b"f".to_vec(),
+      b"barbazboo".to_vec(),
+      b"abc".to_vec(),
+      b"a1".to_vec()
+    ]
+  );
+}
+
+#[test]
+fn range_rev_descending_with_bounds() {
+  let mut t: Trie = Radix::new();
+  for (k, v) in [(b"a".as_slice(), 1u32), (b"b", 2), (b"c", 3), (b"d", 4)] {
+    t.insert(k, v);
+  }
+  let rr = |r: (Bound<&[u8]>, Bound<&[u8]>)| -> Vec<(Vec<u8>, u32)> {
+    t.range_rev::<[u8], _>(r).map(|(k, v)| (k, *v)).collect()
+  };
+  assert_eq!(
+    rr((Bound::Unbounded, Bound::Unbounded)),
+    vec![
+      (b"d".to_vec(), 4),
+      (b"c".to_vec(), 3),
+      (b"b".to_vec(), 2),
+      (b"a".to_vec(), 1)
+    ]
+  );
+  assert_eq!(
+    rr((
+      Bound::Included(b"b".as_slice()),
+      Bound::Included(b"c".as_slice())
+    )),
+    vec![(b"c".to_vec(), 3), (b"b".to_vec(), 2)]
+  );
+  assert_eq!(
+    rr((
+      Bound::Excluded(b"a".as_slice()),
+      Bound::Excluded(b"d".as_slice())
+    )),
+    vec![(b"c".to_vec(), 3), (b"b".to_vec(), 2)]
+  );
+}
+
+#[test]
+fn descendants_inclusive_includes_prefix_key() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"ab"), 2);
+  t.insert(&bytes(b"abc"), 3);
+  t.insert(&bytes(b"b"), 9);
+  // strict excludes the value at the prefix; inclusive includes it.
+  assert_eq!(
+    t.descendants(b"a".as_slice()).copied().collect::<Vec<_>>(),
+    vec![2, 3]
+  );
+  assert_eq!(
+    t.descendants_inclusive(b"a".as_slice())
+      .copied()
+      .collect::<Vec<_>>(),
+    vec![1, 2, 3]
+  );
+  // a prefix that is not itself a key: inclusive == strict (the two agree).
+  let mut t2: Trie = Radix::new();
+  t2.insert(&bytes(b"xy"), 1);
+  t2.insert(&bytes(b"xz"), 2);
+  assert_eq!(
+    t2.descendants_inclusive(b"x".as_slice())
+      .copied()
+      .collect::<Vec<_>>(),
+    vec![1, 2]
+  );
+  // absent prefix: empty.
+  assert_eq!(
+    t.descendants_inclusive(b"zzz".as_slice())
+      .copied()
+      .collect::<Vec<u32>>(),
+    Vec::<u32>::new()
+  );
+}
+
+#[test]
+fn clone_fork_is_bidirectionally_isolated() {
+  // go-immutable-radix's `TestClone`: two independent forks; edits to each are
+  // invisible to the other and to the original (both directions).
+  let mut base: Trie = Radix::new();
+  base.insert(&bytes(b"shared"), 0);
+  let mut a = base.clone();
+  let mut b = base.clone();
+  a.insert(&bytes(b"a-only"), 1);
+  b.insert(&bytes(b"b-only"), 2);
+  assert_eq!(a.get(b"a-only".as_slice()), Some(&1));
+  assert_eq!(a.get(b"b-only".as_slice()), None);
+  assert_eq!(b.get(b"b-only".as_slice()), Some(&2));
+  assert_eq!(b.get(b"a-only".as_slice()), None);
+  assert_eq!(base.len(), 1); // the original is untouched by either fork
+  assert!(base.get(b"a-only".as_slice()).is_none());
+  assert!(base.get(b"b-only".as_slice()).is_none());
+}
+
+#[test]
+fn walk_prefix_and_path_yield_keys() {
+  let mut t: Trie = Radix::new();
+  t.insert(&bytes(b"a"), 1);
+  t.insert(&bytes(b"a/b"), 2);
+  t.insert(&bytes(b"a/b/c"), 3);
+  t.insert(&bytes(b"b"), 9);
+  let kv = |it: Range<'_, u8, u32>| -> Vec<(Vec<u8>, u32)> { it.map(|(k, v)| (k, *v)).collect() };
+  // walk_prefix is node-inclusive (includes the "a" key); ascending (key, value).
+  assert_eq!(
+    kv(t.walk_prefix(b"a".as_slice())),
+    vec![(bytes(b"a"), 1), (bytes(b"a/b"), 2), (bytes(b"a/b/c"), 3)]
+  );
+  // strict excludes the "a" key itself.
+  assert_eq!(
+    kv(t.walk_prefix_strict(b"a".as_slice())),
+    vec![(bytes(b"a/b"), 2), (bytes(b"a/b/c"), 3)]
+  );
+  // descending form reverses the order.
+  assert_eq!(
+    t.walk_prefix_rev(b"a".as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect::<Vec<_>>(),
+    vec![(bytes(b"a/b/c"), 3), (bytes(b"a/b"), 2), (bytes(b"a"), 1)]
+  );
+  // walk_path: the stored keys that are prefixes of "a/b/c", root-to-key.
+  assert_eq!(
+    t.walk_path(b"a/b/c".as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect::<Vec<_>>(),
+    vec![(bytes(b"a"), 1), (bytes(b"a/b"), 2), (bytes(b"a/b/c"), 3)]
+  );
+  assert_eq!(
+    t.walk_path_rev(b"a/b/c".as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect::<Vec<_>>(),
+    vec![(bytes(b"a/b/c"), 3), (bytes(b"a/b"), 2), (bytes(b"a"), 1)]
+  );
+}
+
 // ----- proptest: ordered ops vs a BTreeMap oracle -------------------------
 
 fn model_range(
@@ -1470,6 +1672,101 @@ proptest! {
     let mut d_rev_want = d_want.clone();
     d_rev_want.reverse();
     prop_assert_eq!(d_rev, d_rev_want);
+
+    // range_rev == reverse of forward range, over every bound-kind combination.
+    for &lo in &los {
+      for &hi in &his {
+        let got_rev: Vec<(Vec<u8>, u32)> = trie
+          .range_rev::<[u8], _>((lo, hi))
+          .map(|(k, v)| (k, *v))
+          .collect();
+        let mut want_rev = model_range(&model, lo, hi);
+        want_rev.reverse();
+        prop_assert_eq!(got_rev, want_rev);
+      }
+    }
+
+    // seek_reverse_lower_bound(k) == reverse of range(..=k): keys <= k, descending.
+    let rseek: Vec<(Vec<u8>, u32)> = trie
+      .seek_reverse_lower_bound(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let mut rseek_want = model_range(&model, Bound::Unbounded, Bound::Included(del.as_slice()));
+    rseek_want.reverse();
+    prop_assert_eq!(rseek, rseek_want);
+
+    // node-inclusive descendants == strict descendants plus the value at the key,
+    // in ascending key order.
+    let inc: Vec<u32> = trie
+      .descendants_inclusive(del.as_slice())
+      .copied()
+      .collect();
+    let inc_want: Vec<u32> = model
+      .iter()
+      .filter(|(k, _)| k.starts_with(&del))
+      .map(|(_, v)| *v)
+      .collect();
+    prop_assert_eq!(inc, inc_want);
+
+    // ancestors(k) == the stored keys that are prefixes of k (inclusive), ascending.
+    let anc: Vec<u32> = trie.ancestors(del.as_slice()).copied().collect();
+    let anc_want: Vec<u32> = model
+      .iter()
+      .filter(|(k, _)| del.starts_with(k.as_slice()))
+      .map(|(_, v)| *v)
+      .collect();
+    prop_assert_eq!(anc, anc_want);
+
+    // walk_prefix (inclusive) == model keys with del as a prefix, (key, value) asc.
+    let wp: Vec<(Vec<u8>, u32)> = trie.walk_prefix(del.as_slice()).map(|(k, v)| (k, *v)).collect();
+    let wp_want: Vec<(Vec<u8>, u32)> = model
+      .iter()
+      .filter(|(k, _)| k.starts_with(&del))
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+    prop_assert_eq!(&wp, &wp_want);
+    let wpr: Vec<(Vec<u8>, u32)> = trie
+      .walk_prefix_rev(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let mut wp_rev_want = wp_want.clone();
+    wp_rev_want.reverse();
+    prop_assert_eq!(wpr, wp_rev_want);
+
+    // walk_prefix_strict == model keys strictly extending del.
+    let wps: Vec<(Vec<u8>, u32)> = trie
+      .walk_prefix_strict(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let wps_want: Vec<(Vec<u8>, u32)> = model
+      .iter()
+      .filter(|(k, _)| k.len() > del.len() && k.starts_with(&del))
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+    prop_assert_eq!(&wps, &wps_want);
+    let wpsr: Vec<(Vec<u8>, u32)> = trie
+      .walk_prefix_strict_rev(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let mut wps_rev_want = wps_want.clone();
+    wps_rev_want.reverse();
+    prop_assert_eq!(wpsr, wps_rev_want);
+
+    // walk_path == model keys that are prefixes of del (inclusive), root-to-key.
+    let wpath: Vec<(Vec<u8>, u32)> = trie.walk_path(del.as_slice()).map(|(k, v)| (k, *v)).collect();
+    let wpath_want: Vec<(Vec<u8>, u32)> = model
+      .iter()
+      .filter(|(k, _)| del.starts_with(k.as_slice()))
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+    prop_assert_eq!(&wpath, &wpath_want);
+    let wpathr: Vec<(Vec<u8>, u32)> = trie
+      .walk_path_rev(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let mut wpath_rev_want = wpath_want.clone();
+    wpath_rev_want.reverse();
+    prop_assert_eq!(wpathr, wpath_rev_want);
 
     // drain_prefix returns the at-or-below values in ascending key order, and is
     // the value-returning twin of delete_prefix.

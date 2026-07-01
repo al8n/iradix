@@ -656,6 +656,60 @@ fn range_bound_combinations_and_seek() {
   assert_eq!(seek(b"z"), vec![]); // after all
 }
 
+#[test]
+fn reverse_range_and_seek_on_arc_face() {
+  let t = build([(b"a", 1), (b"b", 2), (b"c", 3), (b"d", 4)]);
+  // range_rev yields (key, value) descending.
+  let full: Vec<(Vec<u8>, u32)> = t
+    .range_rev::<[u8], _>((Bound::Unbounded, Bound::Unbounded))
+    .map(|(k, v)| (k, *v))
+    .collect();
+  assert_eq!(
+    full,
+    vec![
+      (bytes(b"d"), 4),
+      (bytes(b"c"), 3),
+      (bytes(b"b"), 2),
+      (bytes(b"a"), 1)
+    ]
+  );
+  // seek_reverse_lower_bound: keys <= k, descending.
+  let rseek = |k: &[u8]| -> Vec<u32> { t.seek_reverse_lower_bound(k).map(|(_, v)| *v).collect() };
+  assert_eq!(rseek(b"c"), vec![3, 2, 1]); // exact
+  assert_eq!(rseek(b"bb"), vec![2, 1]); // between
+  assert_eq!(rseek(b""), vec![]); // before all
+}
+
+#[test]
+fn descendants_inclusive_on_radix_and_txn() {
+  let base = build([(b"a", 1), (b"ab", 2), (b"abc", 3)]);
+  // Radix: node-inclusive includes the value at the prefix, strict excludes it.
+  assert_eq!(
+    base
+      .descendants_inclusive(b"a".as_slice())
+      .copied()
+      .collect::<Vec<_>>(),
+    vec![1, 2, 3]
+  );
+  assert_eq!(
+    base
+      .descendants(b"a".as_slice())
+      .copied()
+      .collect::<Vec<_>>(),
+    vec![2, 3]
+  );
+  // Txn: read-your-writes through the working copy.
+  let mut txn = base.txn();
+  txn.insert(b"ad".as_slice(), 4);
+  assert_eq!(
+    txn
+      .descendants_inclusive(b"a".as_slice())
+      .copied()
+      .collect::<Vec<_>>(),
+    vec![1, 2, 3, 4]
+  );
+}
+
 fn model_range(
   model: &BTreeMap<Vec<u8>, u32>,
   lo: Bound<&[u8]>,
@@ -747,6 +801,84 @@ proptest! {
     let seek: Vec<(Vec<u8>, u32)> =
       trie.seek_lower_bound(del.as_slice()).map(|(k, v)| (k, *v)).collect();
     prop_assert_eq!(seek, model_range(&model, Bound::Included(del.as_slice()), Bound::Unbounded));
+
+    // range_rev == reverse of forward range, over every bound-kind combination.
+    for &lo in &los {
+      for &hi in &his {
+        let got_rev: Vec<(Vec<u8>, u32)> = trie
+          .range_rev::<[u8], _>((lo, hi))
+          .map(|(k, v)| (k, *v))
+          .collect();
+        let mut want_rev = model_range(&model, lo, hi);
+        want_rev.reverse();
+        prop_assert_eq!(got_rev, want_rev);
+      }
+    }
+
+    // seek_reverse_lower_bound(k) == reverse of range(..=k): keys <= k, descending.
+    let rseek: Vec<(Vec<u8>, u32)> = trie
+      .seek_reverse_lower_bound(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let mut rseek_want = model_range(&model, Bound::Unbounded, Bound::Included(del.as_slice()));
+    rseek_want.reverse();
+    prop_assert_eq!(rseek, rseek_want);
+
+    // node-inclusive descendants == strict descendants plus the value at the key.
+    let inc: Vec<u32> = trie
+      .descendants_inclusive(del.as_slice())
+      .copied()
+      .collect();
+    let inc_want: Vec<u32> = model
+      .iter()
+      .filter(|(k, _)| k.starts_with(&del))
+      .map(|(_, v)| *v)
+      .collect();
+    prop_assert_eq!(inc, inc_want);
+
+    // walk_prefix (inclusive) == model keys with del as a prefix, (key, value) asc.
+    let wp: Vec<(Vec<u8>, u32)> = trie.walk_prefix(del.as_slice()).map(|(k, v)| (k, *v)).collect();
+    let wp_want: Vec<(Vec<u8>, u32)> = model
+      .iter()
+      .filter(|(k, _)| k.starts_with(&del))
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+    prop_assert_eq!(&wp, &wp_want);
+    let wpr: Vec<(Vec<u8>, u32)> = trie
+      .walk_prefix_rev(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let mut wp_rev_want = wp_want.clone();
+    wp_rev_want.reverse();
+    prop_assert_eq!(wpr, wp_rev_want);
+
+    // walk_prefix_strict == model keys strictly extending del.
+    let wps: Vec<(Vec<u8>, u32)> = trie
+      .walk_prefix_strict(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let wps_want: Vec<(Vec<u8>, u32)> = model
+      .iter()
+      .filter(|(k, _)| k.len() > del.len() && k.starts_with(&del))
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+    prop_assert_eq!(&wps, &wps_want);
+    let wpsr: Vec<(Vec<u8>, u32)> = trie
+      .walk_prefix_strict_rev(del.as_slice())
+      .map(|(k, v)| (k, *v))
+      .collect();
+    let mut wps_rev_want = wps_want.clone();
+    wps_rev_want.reverse();
+    prop_assert_eq!(wpsr, wps_rev_want);
+
+    // walk_path == model keys that are prefixes of del (inclusive), root-to-key.
+    let wpath: Vec<(Vec<u8>, u32)> = trie.walk_path(del.as_slice()).map(|(k, v)| (k, *v)).collect();
+    let wpath_want: Vec<(Vec<u8>, u32)> = model
+      .iter()
+      .filter(|(k, _)| del.starts_with(k.as_slice()))
+      .map(|(k, v)| (k.clone(), *v))
+      .collect();
+    prop_assert_eq!(&wpath, &wpath_want);
 
     // delete_prefix removes the at-or-below set; drain_prefix returns it ascending.
     let (drained_trie, drained) = one_drain_prefix(&trie, del.as_slice());
@@ -1077,6 +1209,57 @@ mod watch {
     let r1 = t.commit();
     r1.notify_changes_since(&r0);
     assert!(!w.block_wait_timeout(QUIET));
+  }
+
+  #[test]
+  fn watch_key_fires_on_removal() {
+    // Removing the watched key replaces its node (Some -> None), so the watch fires.
+    let r0 = build([(b"a", 1), (b"b", 2)]);
+    let w = r0.watch(b"a".as_slice());
+    let mut t = r0.txn();
+    assert_eq!(t.remove(b"a".as_slice()), Some(1));
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(w.block_wait_timeout(FIRED));
+  }
+
+  #[test]
+  fn delete_prefix_fires_subtree_and_sibling_stays_quiet() {
+    // go's TestTrackMutate_DeletePrefix: a partial `delete_prefix` fires the watches
+    // under the prefix (and the prefix watch), while an untouched sibling stays quiet.
+    let r0 = build([(b"p/a", 1), (b"p/b", 2), (b"q", 9)]);
+    let wa = r0.watch(b"p/a".as_slice());
+    let wb = r0.watch(b"p/b".as_slice());
+    let wp = r0.watch_prefix(b"p".as_slice());
+    let wq = r0.watch(b"q".as_slice());
+    let mut t = r0.txn();
+    assert_eq!(t.delete_prefix(b"p".as_slice()), 2);
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+    assert!(wa.block_wait_timeout(FIRED));
+    assert!(wb.block_wait_timeout(FIRED));
+    assert!(wp.block_wait_timeout(FIRED));
+    // "q" is a shared, ptr-equal sibling subtree — the diff prunes it, so it is quiet.
+    assert!(!wq.block_wait_timeout(QUIET));
+  }
+
+  #[test]
+  fn merge_reuse_then_modify_fires() {
+    // go's TestTrackMutate_cachedNodeChange: a node reused by a merge stays quiet for
+    // that transition, but a LATER change to it fires a freshly armed watch.
+    let r0 = build([(b"a", 1), (b"abc", 3)]);
+    let mut t = r0.txn();
+    assert_eq!(t.remove(b"a".as_slice()), Some(1)); // merges, reusing the "abc" node
+    let r1 = t.commit();
+    r1.notify_changes_since(&r0);
+
+    // Re-arm on the merged version, then change the reused node's value.
+    let w = r1.watch(b"abc".as_slice());
+    let mut t = r1.txn();
+    assert_eq!(t.insert(b"abc".as_slice(), 30), Some(3));
+    let r2 = t.commit();
+    r2.notify_changes_since(&r1);
+    assert!(w.block_wait_timeout(FIRED));
   }
 
   #[test]
