@@ -1,6 +1,6 @@
 [package]
 name = "iradix"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.95"
 repository = "https://github.com/al8n/iradix"
@@ -15,12 +15,7 @@ keywords = ["radix", "trie", "persistent", "immutable", "copy-on-write"]
 default = ["std"]
 std = ["event-listener?/std"]
 alloc = []
-# Observe key/prefix changes across committed versions. Async `Watch::changed()`
-# works on no_std + alloc; the blocking `Watch::block_wait*` additionally need `std`.
 watch = ["dep:event-listener"]
-# Runtime-agnostic async `Watch::changed_timeout::<R>()` via agnostic-lite's
-# `RuntimeLite` (re-exported as `iradix::RuntimeLite`). Brings the trait only; name a
-# runtime `R` from agnostic-lite itself. Works on no_std + alloc.
 future = ["dep:agnostic-lite", "watch"]
 tokio = ["future", "agnostic-lite/tokio"]
 smol = ["future", "agnostic-lite/smol"]
