@@ -593,4 +593,12 @@ criterion_group!(
   bench_remove,
   bench_snapshot_insert,
 );
+
+// `cargo miri test --all-targets` runs this harness-less bench binary too, and
+// Criterion's startup probes gnuplot through `Command::output` — a foreign call the
+// interpreter cannot perform (and timing under an interpreter would be meaningless).
+#[cfg(not(miri))]
 criterion_main!(benches);
+
+#[cfg(miri)]
+fn main() {}
