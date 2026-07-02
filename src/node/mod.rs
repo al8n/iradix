@@ -737,48 +737,76 @@ where
 
   /// Removes the value at the components yielded by `key` from the subtree rooted
   /// at `node_ptr`, copying on write and re-compressing. Returns the removed value
-  /// if present.
+  /// if present. The caller adjusts `len` (by one) only when this returns `Some`.
   ///
-  /// `key` is consumed lazily (mirroring [`insert`](Node::insert) and the read
-  /// path): each matched edge label is walked through the same `Peekable`, so no
-  /// whole-key `Vec` is materialized.
+  /// Single lazy descent (no separate existence pass): every miss — a missing edge,
+  /// a mid-edge divergence, or a key ending on a valueless node — is decided on the
+  /// shared node **before** any [`make_mut`](SharedPointer::make_mut), so an absent
+  /// key clones nothing and never disturbs structural sharing. On the found path a
+  /// unique node is edited in place; a shared node is rebuilt lazily bottom-up (the
+  /// [functional persistent-remove pattern]) — recursing into a clone of the child
+  /// pointer (an O(1) refcount bump, not a node copy) and copying this node only once
+  /// a descendant has actually changed. `key` is consumed lazily (mirroring
+  /// [`insert`](Node::insert) and the read path), so no whole-key `Vec` is
+  /// materialized.
+  ///
+  /// Panic safety: on a shared node the rebuilt copies bubble up through owned local
+  /// pointers, and the ONLY write into the live tree is the outermost frame's own
+  /// `make_mut` on `node_ptr` (or, at the root, the caller reassigning `self.root`) —
+  /// which is the last user-`Clone`-capable step, after which only pointer moves and
+  /// the label-MOVING [`normalize_child`] run. So a panicking user `Clone` anywhere on
+  /// the way up unwinds before the live tree is ever mutated, leaving the original
+  /// tree and `len` untouched; the taken value is merely dropped, never returned. The
+  /// caller decrements `len` only on the returned `Some` (which an unwind never
+  /// produces), so `len` is corrected there rather than here.
+  ///
+  /// [functional persistent-remove pattern]: https://en.wikipedia.org/wiki/Persistent_data_structure
   pub(crate) fn remove<'k, K, I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
     key: &mut core::iter::Peekable<I>,
-    len: &mut usize,
   ) -> Option<V>
   where
     K: RadixKey<Owned = C> + ?Sized + 'k,
     I: Iterator<Item = K::Component<'k>>,
   {
-    let node = SharedPointer::make_mut(node_ptr);
-
     if key.peek().is_none() {
-      // The value `take` is the single infallible commit point: decrement `len`
-      // here, after the fallible make-mut/traversal above has already succeeded
-      // and before any (fallible) re-compression on the way back up. An unwind
-      // before this point never reaches it, so `len` stays accurate.
-      let removed = node.value.take();
+      // Key ends here: this node is the target. A valueless node is a miss — decided
+      // on the shared node (read-only), so it clones nothing; only a real hit reaches
+      // `make_mut`.
+      node_ptr.value.as_ref()?;
+      return SharedPointer::make_mut(node_ptr).value.take();
+    }
+
+    let first = key.peek().expect("key has a next component").clone();
+    // Locate and match the edge on the SHARED node: a missing edge or a mid-edge
+    // divergence is a miss that clones nothing.
+    let i = node_ptr.child_index_cmp::<K>(first).ok()?;
+    let shared = match_prefix::<K, _>(&node_ptr.children[i].label, key);
+    if shared != node_ptr.children[i].label.len() {
+      return None;
+    }
+
+    // The edge matches; descend into child `i`. A unique node is edited in place
+    // (no clone, exactly like a non-persistent trie); a shared node defers its copy
+    // until a descendant is known to have changed.
+    if let Some(node) = SharedPointer::get_mut(node_ptr) {
+      let removed = Node::remove::<K, _>(&mut node.children[i].child, key);
       if removed.is_some() {
-        *len -= 1;
+        normalize_child(node, i);
       }
       return removed;
     }
 
-    let first = key.peek().expect("key has a next component").clone();
-    let i = node.child_index_cmp::<K>(first).ok()?;
-    let shared = match_prefix::<K, _>(&node.children[i].label, key);
-    if shared != node.children[i].label.len() {
-      // The key diverges within this edge (or runs out mid-edge): no exact match
-      // below, so nothing to remove.
-      return None;
-    }
-
-    let removed = Node::remove::<K, _>(&mut node.children[i].child, key, len);
-    if removed.is_some() {
-      normalize_child(node, i);
-    }
-    removed
+    // Shared: recurse into a clone of the child pointer (an O(1) refcount bump, not a
+    // node copy). On a miss below, the clone is dropped and this node is never copied
+    // — so an absent key preserves sharing no matter how deep the divergence is.
+    let mut child = node_ptr.children[i].child.clone();
+    let removed = Node::remove::<K, _>(&mut child, key)?;
+    // A descendant changed: copy this node now and splice the rebuilt child.
+    let node = SharedPointer::make_mut(node_ptr);
+    node.children[i].child = child;
+    normalize_child(node, i);
+    Some(removed)
   }
 
   /// Unlinks every strict descendant of `key` under `node_ptr`, copying on write
@@ -1194,31 +1222,25 @@ where
     old
   }
 
-  /// Removes and returns the value at exactly the components yielded by
-  /// `make_key`, if any.
+  /// Removes and returns the value at exactly the components yielded by `key`, if
+  /// any. `key` is walked lazily in a single descent (no whole-key `Vec`).
   ///
-  /// `make_key` is a re-iterable key source called once per pass: a read-only
-  /// existence pass first, then (only when present) the mutate pass. Re-yielding a
-  /// fresh iterator per pass keeps the no-copy-on-absent guarantee while avoiding a
-  /// whole-key `Vec` — both passes walk the key lazily. Correctness relies on the
-  /// [`RadixKey`](crate::RadixKey) determinism contract (each call yields the same
-  /// components); the public wrappers pass `|| key.components()`.
-  pub(crate) fn remove<'k, K, F, I>(&mut self, make_key: F) -> Option<V>
+  /// [`Node::remove`] avoids copy-on-write on an absent key entirely (the miss is
+  /// decided on shared nodes), so a single pass suffices — no separate read-only
+  /// existence pass. `len` is decremented here, only on a real removal, after the
+  /// (fallible) descent has returned: a panicking user `Clone` unwinds without
+  /// producing `Some`, leaving the trie and `len` consistent.
+  pub(crate) fn remove<'k, K, I>(&mut self, key: I) -> Option<V>
   where
     K: RadixKey<Owned = C> + ?Sized + 'k,
-    F: Fn() -> I,
     I: Iterator<Item = K::Component<'k>>,
   {
-    // A read-only existence check first: a remove of an absent key must not
-    // copy-on-write (and so must not disturb structural sharing). When the key
-    // is present, every node on its root-to-value path genuinely changes, so the
-    // eager copy-on-write in `Node::remove` is justified.
-    self.get::<K, _>(make_key())?;
     let root = self.root.as_mut()?;
-    // `Node::remove` decrements `len` at the value-`take` itself — after its
-    // fallible make-mut/traversal succeeds — so a panic in a shared-node clone or
-    // a user comparison on the way down leaves `len` and the trie consistent.
-    Node::remove::<K, _>(root, &mut make_key().peekable(), &mut self.len)
+    let removed = Node::remove::<K, _>(root, &mut key.peekable());
+    if removed.is_some() {
+      self.len -= 1;
+    }
+    removed
   }
 
   /// Removes every *strict* descendant of the components yielded by `make_key`
