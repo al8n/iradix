@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion};
 use std::hint::black_box;
 
 use im::OrdMap;
@@ -584,7 +584,7 @@ fn bench_snapshot_insert(c: &mut Criterion) {
   group.finish();
 }
 
-criterion_group!(
+criterion::criterion_group!(
   benches,
   bench_insert,
   bench_get_hit,
@@ -598,7 +598,7 @@ criterion_group!(
 // Criterion's startup probes gnuplot through `Command::output` — a foreign call the
 // interpreter cannot perform (and timing under an interpreter would be meaningless).
 #[cfg(not(miri))]
-criterion_main!(benches);
+criterio::cricriterion_main!(benches);
 
 #[cfg(miri)]
 fn main() {}
