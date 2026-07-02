@@ -78,8 +78,9 @@ where
         return &node.watch;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared == edge.label.len() {
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared == label.len() {
         node = &edge.child;
       } else {
         return &node.watch;
