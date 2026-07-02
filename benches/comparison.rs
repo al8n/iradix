@@ -598,7 +598,7 @@ criterion::criterion_group!(
 // Criterion's startup probes gnuplot through `Command::output` — a foreign call the
 // interpreter cannot perform (and timing under an interpreter would be meaningless).
 #[cfg(not(miri))]
-criterio::cricriterion_main!(benches);
+criterion::criterion_main!(benches);
 
 #[cfg(miri)]
 fn main() {}
