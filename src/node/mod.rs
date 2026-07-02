@@ -18,13 +18,37 @@
 //! unwinding) and allocation failure (it aborts via the alloc-error handler, not an
 //! unwind), so neither can corrupt the trie by returning mid-operation.
 
-use std::{boxed::Box, vec, vec::Vec};
+use std::vec::Vec;
 
 use core::{cmp::Ordering, ops::Bound};
 
 use archery::{SharedPointer, SharedPointerKind};
+use smallvec::{SmallVec, smallvec};
 
 use crate::RadixKey;
+
+/// Inline component capacity of an edge label. A path-compressed label at or under
+/// this length lives in the parent node's allocation with no separate heap buffer;
+/// a longer label spills to the heap. Chosen so the common short radix labels stay
+/// inline without bloating a node with rarely-filled slots.
+const LABEL_INLINE: usize = 16;
+
+/// Inline child capacity of a node. A node with at most this many edges keeps them
+/// in its own allocation; a higher-fanout node spills to the heap. Kept at one:
+/// single-child chain nodes (common under path compression) then hold their edge
+/// inline, while every extra inline slot enlarges *every* node and measurably slows
+/// full-trie iteration — so wider nodes are left on the heap.
+const CHILDREN_INLINE: usize = 1;
+
+/// A path-compressed edge label: inline for the short common case (see
+/// [`LABEL_INLINE`]), heap-backed once it spills. Derefs to `[C]`, so every
+/// slice-based walk (`match_prefix`, `common_len`, indexing, `split_at`) is unchanged.
+pub(crate) type Label<C> = SmallVec<[C; LABEL_INLINE]>;
+
+/// A node's sorted child edges: inline for the low-fanout common case (see
+/// [`CHILDREN_INLINE`]), heap-backed once it spills. Derefs to `[Edge<..>]`, so
+/// `binary_search`, range, and iteration go through the slice unchanged.
+pub(crate) type Children<P, C, V> = SmallVec<[Edge<P, C, V>; CHILDREN_INLINE]>;
 
 /// A subtree root paired with its reconstructed key, as returned by
 /// [`Node::prefix_seed`].
@@ -45,7 +69,7 @@ pub(crate) struct Edge<P, C, V>
 where
   P: SharedPointerKind,
 {
-  pub(crate) label: Box<[C]>,
+  pub(crate) label: Label<C>,
   pub(crate) child: SharedPointer<Node<P, C, V>, P>,
 }
 
@@ -73,7 +97,7 @@ where
   P: SharedPointerKind,
 {
   pub(crate) value: Option<V>,
-  pub(crate) children: Vec<Edge<P, C, V>>,
+  pub(crate) children: Children<P, C, V>,
   /// This version's change channel. A copy-on-write clone makes a *fresh* slot (a
   /// new version is a new channel); the old node keeps its own, fired when the
   /// publish-time structural diff sees it replaced.
@@ -108,8 +132,9 @@ where
   pub(crate) const fn new() -> Self {
     Self {
       value: None,
-      children: Vec::new(),
-      // `Event::new()` is `const`, so the node constructor stays `const`.
+      // `SmallVec::new_const` is `const` (as is `Event::new()`), so the node
+      // constructor stays `const`.
+      children: SmallVec::new_const(),
       #[cfg(feature = "watch")]
       watch: WatchSlot::new(),
     }
@@ -620,12 +645,13 @@ where
     let i = match node.child_index_cmp::<K>(first) {
       Err(insert_at) => {
         // No edge begins with `first`: the new leaf's label is the WHOLE remaining
-        // key. Consuming the iterator yields the peeked `first` too. `to_owned` is the
+        // key. Consuming the iterator yields the peeked `first` too. A short label
+        // stays inline (no heap buffer); only a long one spills. `to_owned` is the
         // sole allocation of the key walk (for a `Path`, one `OsString` per component).
-        let label: Box<[C]> = key.map(K::to_owned).collect::<Vec<C>>().into_boxed_slice();
+        let label: Label<C> = key.map(K::to_owned).collect();
         let leaf = Node {
           value: Some(value),
-          children: Vec::new(),
+          children: SmallVec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         };
@@ -656,10 +682,10 @@ where
     // before anything is detached, so an unwind leaves the trie and `len`
     // untouched. Only the final single move splices `mid` in, dropping the old
     // edge (whose child was already cloned, so no subtree is lost).
-    let key_rest: Vec<C> = key.map(K::to_owned).collect();
+    let key_rest: Label<C> = key.map(K::to_owned).collect();
     let (head, tail) = node.children[i].label.split_at(shared);
-    let head: Box<[C]> = head.to_vec().into_boxed_slice();
-    let tail: Box<[C]> = tail.to_vec().into_boxed_slice();
+    let head: Label<C> = head.iter().cloned().collect();
+    let tail: Label<C> = tail.iter().cloned().collect();
     let old_child_edge = Edge {
       label: tail,
       child: node.children[i].child.clone(),
@@ -669,7 +695,7 @@ where
       // The new key ends exactly at the split point: value lives on `mid`.
       Node {
         value: Some(value),
-        children: vec![old_child_edge],
+        children: smallvec![old_child_edge],
         #[cfg(feature = "watch")]
         watch: WatchSlot::new(),
       }
@@ -677,10 +703,10 @@ where
       // The new key diverges from the old child within this edge: two children in
       // sorted order. The ordering `Ord` is the last fallible step before splicing.
       let new_leaf = Edge {
-        label: key_rest.into_boxed_slice(),
+        label: key_rest,
         child: SharedPointer::new(Node {
           value: Some(value),
-          children: Vec::new(),
+          children: SmallVec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }),
@@ -688,14 +714,14 @@ where
       if new_leaf.label[0] < old_child_edge.label[0] {
         Node {
           value: None,
-          children: vec![new_leaf, old_child_edge],
+          children: smallvec![new_leaf, old_child_edge],
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }
       } else {
         Node {
           value: None,
-          children: vec![old_child_edge, new_leaf],
+          children: smallvec![old_child_edge, new_leaf],
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }
@@ -1463,14 +1489,14 @@ where
       // return value is never dropped by an unwind here.
       let merged_len =
         node.children[i].label.len() + node.children[i].child.children[0].label.len();
-      let mut merged: Vec<C> = Vec::with_capacity(merged_len);
+      let mut merged: Label<C> = SmallVec::with_capacity(merged_len);
       let grandchild_edge = {
         let child = SharedPointer::make_mut(&mut node.children[i].child);
         child.children.pop().expect("checked exactly one child")
       };
       merged.extend(core::mem::take(&mut node.children[i].label));
       merged.extend(grandchild_edge.label);
-      node.children[i].label = merged.into_boxed_slice();
+      node.children[i].label = merged;
       node.children[i].child = grandchild_edge.child;
     }
     _ => {}

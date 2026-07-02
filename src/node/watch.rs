@@ -101,7 +101,7 @@ fn collect_subtree<'a, P, C, V>(
 ) where
   P: SharedPointerKind,
 {
-  let mut stack = vec![node];
+  let mut stack = std::vec![node];
   while let Some(n) = stack.pop() {
     out.push(&n.watch);
     for edge in &n.children {
@@ -154,7 +154,7 @@ pub(crate) fn collect_changed<'a, P, C, V>(
   C: Ord,
   P: SharedPointerKind,
 {
-  let mut stack = vec![Work::Pair(base, work)];
+  let mut stack = std::vec![Work::Pair(base, work)];
   drive(&mut stack, out);
 }
 
