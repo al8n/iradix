@@ -1,0 +1,14 @@
+# Coverage reporting is advisory: the checks post a coverage delta but never fail a
+# PR. Benchmarks and their comparison harness are not coverage-relevant, so they are
+# excluded from the measured base.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+ignore:
+  - "benches"
