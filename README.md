@@ -171,6 +171,21 @@ makes no guarantee across either:
   allocation panic to be safe across; OOM does not corrupt the trie because it
   does not return.
 
+## Benchmarks
+
+`benches/comparison.rs` measures iradix against [`radix_trie`], [`patricia_tree`],
+[`qp-trie`], [`im`]'s `OrdMap`, and `std`'s `BTreeMap` across insert / get / iter /
+remove / snapshot-then-insert, on random and path-like keysets — numbers and
+methodology in [`benches/README.md`](benches/README.md). The shape of the results:
+among *ordered* prefix maps iradix leads on insert/get/remove, and its
+copy-on-write snapshot stays O(1) — a clone-then-insert runs in nanoseconds where
+an ephemeral map deep-copies — which is the reason to reach for a persistent trie.
+
+[`radix_trie`]: https://docs.rs/radix_trie
+[`patricia_tree`]: https://docs.rs/patricia_tree
+[`qp-trie`]: https://docs.rs/qp-trie
+[`im`]: https://docs.rs/im
+
 ## `#![no_std]`
 
 The crate is `no_std` with `alloc`. Build it with `--no-default-features
