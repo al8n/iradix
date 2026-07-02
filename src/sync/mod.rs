@@ -34,10 +34,7 @@
 
 use std::vec::Vec;
 
-use core::{
-  borrow::Borrow,
-  ops::{Bound, RangeBounds},
-};
+use core::ops::{Bound, RangeBounds};
 
 // The sync face fixes the trie's pointer kind: `std::sync::Arc` via `ArcK` by default,
 // or — with the `triomphe` feature — the more compact `triomphe::Arc` (no weak count)
@@ -80,8 +77,8 @@ mod watch;
 /// A generic, persistent (copy-on-write) **immutable** radix trie, shareable across
 /// threads.
 ///
-/// Keys decompose into [`Component`](RadixKey::Component)s via [`RadixKey`]; the
-/// trie is parameterized over the component type `C` and the value type `V`, and
+/// Keys are walked into components via [`RadixKey`]; the trie is parameterized over the
+/// stored component type `C` (a key's [`RadixKey::Owned`]) and the value type `V`, and
 /// uses [`Arc`](std::sync::Arc) pointers internally — or `triomphe::Arc` with the
 /// `triomphe` feature — so it is `Send + Sync` whenever both `C` and `V` are
 /// (auto-derived — no `unsafe impl`).
@@ -218,22 +215,22 @@ where
 {
   /// Returns a reference to the value stored at exactly `key`, if any.
   ///
-  /// The key is walked lazily over its components; the walk allocates nothing unless
-  /// the key type's `components` does — e.g. a `Path` key allocates one `OsString`
-  /// per component (see the [`RadixKey`] Allocation section).
+  /// The key is walked lazily over its components; the walk is **allocation-free** for
+  /// every built-in key, `Path` included — only `insert` allocates the stored form (see
+  /// the [`RadixKey`] Allocation section).
   #[inline]
   pub fn get<K>(&self, key: &K) -> Option<&V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.inner.get(key.components())
+    self.inner.get::<K, _>(key.components())
   }
 
   /// Returns `true` if a value is stored at exactly `key`.
   #[inline]
   pub fn contains<K>(&self, key: &K) -> bool
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     self.get(key).is_some()
   }
@@ -243,9 +240,9 @@ where
   #[inline]
   pub fn get_ancestor<K>(&self, key: &K) -> Option<&V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.inner.ancestor(key.components(), true)
+    self.inner.ancestor::<K, _>(key.components(), true)
   }
 
   /// Returns the value of the deepest stored key that is a *strict* prefix of
@@ -253,16 +250,16 @@ where
   #[inline]
   pub fn strict_ancestor<K>(&self, key: &K) -> Option<&V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.inner.ancestor(key.components(), false)
+    self.inner.ancestor::<K, _>(key.components(), false)
   }
 
   /// Returns `true` if any stored key is a prefix of `key` (inclusive).
   #[inline]
   pub fn has_ancestor<K>(&self, key: &K) -> bool
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     self.get_ancestor(key).is_some()
   }
@@ -280,10 +277,10 @@ where
   #[inline]
   pub fn ancestors<K>(&self, key: &K) -> Ancestors<'_, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     Ancestors {
-      inner: self.inner.ancestors(key.components()),
+      inner: self.inner.ancestors::<K, _>(key.components()),
     }
   }
 
@@ -292,10 +289,10 @@ where
   #[inline]
   pub fn descendants<K>(&self, key: &K) -> Descendants<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     Descendants {
-      inner: self.inner.descendants(key.components()),
+      inner: self.inner.descendants::<K, _>(key.components()),
     }
   }
 
@@ -335,10 +332,10 @@ where
   #[must_use]
   pub fn descendants_rev<K>(&self, key: &K) -> RevDescendants<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     RevDescendants {
-      inner: self.inner.descendants_rev(key.components()),
+      inner: self.inner.descendants_rev::<K, _>(key.components()),
     }
   }
 
@@ -351,7 +348,7 @@ where
   #[must_use]
   pub fn range<K, R>(&self, range: R) -> Range<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     R: RangeBounds<K>,
     C: Clone,
   {
@@ -370,10 +367,10 @@ where
   #[must_use]
   pub fn seek_lower_bound<K>(&self, key: &K) -> Range<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
-    let lower: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
+    let lower: Vec<C> = key.components().map(K::to_owned).collect();
     Range {
       inner: self.inner.range(Bound::Included(lower), Bound::Unbounded),
     }
@@ -386,10 +383,10 @@ where
   #[must_use]
   pub fn descendants_inclusive<K>(&self, key: &K) -> Descendants<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     Descendants {
-      inner: self.inner.descendants_inclusive(key.components()),
+      inner: self.inner.descendants_inclusive::<K, _>(key.components()),
     }
   }
 
@@ -399,7 +396,7 @@ where
   #[must_use]
   pub fn range_rev<K, R>(&self, range: R) -> RevRange<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     R: RangeBounds<K>,
     C: Clone,
   {
@@ -419,10 +416,10 @@ where
   #[must_use]
   pub fn seek_reverse_lower_bound<K>(&self, key: &K) -> RevRange<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
-    let upper: Vec<C> = key.components().map(|c| c.borrow().clone()).collect();
+    let upper: Vec<C> = key.components().map(K::to_owned).collect();
     RevRange {
       inner: self
         .inner
@@ -437,11 +434,11 @@ where
   #[must_use]
   pub fn walk_prefix<K>(&self, prefix: &K) -> Range<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
     Range {
-      inner: self.inner.prefix_entries(prefix.components(), true),
+      inner: self.inner.prefix_entries::<K, _>(prefix.components(), true),
     }
   }
 
@@ -450,11 +447,13 @@ where
   #[must_use]
   pub fn walk_prefix_rev<K>(&self, prefix: &K) -> RevRange<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
     RevRange {
-      inner: self.inner.prefix_entries_rev(prefix.components(), true),
+      inner: self
+        .inner
+        .prefix_entries_rev::<K, _>(prefix.components(), true),
     }
   }
 
@@ -464,11 +463,13 @@ where
   #[must_use]
   pub fn walk_prefix_strict<K>(&self, prefix: &K) -> Range<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
     Range {
-      inner: self.inner.prefix_entries(prefix.components(), false),
+      inner: self
+        .inner
+        .prefix_entries::<K, _>(prefix.components(), false),
     }
   }
 
@@ -477,11 +478,13 @@ where
   #[must_use]
   pub fn walk_prefix_strict_rev<K>(&self, prefix: &K) -> RevRange<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
     RevRange {
-      inner: self.inner.prefix_entries_rev(prefix.components(), false),
+      inner: self
+        .inner
+        .prefix_entries_rev::<K, _>(prefix.components(), false),
     }
   }
 
@@ -492,10 +495,10 @@ where
   #[must_use]
   pub fn walk_path<K>(&self, key: &K) -> PathEntries<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
-    PathEntries::new(self.inner.ancestor_entries(key.components()))
+    PathEntries::new(self.inner.ancestor_entries::<K, _>(key.components()))
   }
 
   /// The reverse (`key`-to-root) form of [`walk_path`](Radix::walk_path).
@@ -503,10 +506,10 @@ where
   #[must_use]
   pub fn walk_path_rev<K>(&self, key: &K) -> PathEntries<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
-    let mut entries = self.inner.ancestor_entries(key.components());
+    let mut entries = self.inner.ancestor_entries::<K, _>(key.components());
     entries.reverse();
     PathEntries::new(entries)
   }
@@ -618,16 +621,16 @@ where
   #[inline]
   pub fn get<K>(&self, key: &K) -> Option<&V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.get(key.components())
+    self.working.get::<K, _>(key.components())
   }
 
   /// Returns `true` if a value is stored at exactly `key` in the working copy.
   #[inline]
   pub fn contains<K>(&self, key: &K) -> bool
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     self.get(key).is_some()
   }
@@ -637,9 +640,9 @@ where
   #[inline]
   pub fn get_ancestor<K>(&self, key: &K) -> Option<&V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.ancestor(key.components(), true)
+    self.working.ancestor::<K, _>(key.components(), true)
   }
 
   /// Returns the value of the deepest stored key that is a *strict* prefix of
@@ -647,16 +650,16 @@ where
   #[inline]
   pub fn strict_ancestor<K>(&self, key: &K) -> Option<&V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.ancestor(key.components(), false)
+    self.working.ancestor::<K, _>(key.components(), false)
   }
 
   /// Returns `true` if any stored key is a prefix of `key` (inclusive).
   #[inline]
   pub fn has_ancestor<K>(&self, key: &K) -> bool
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     self.get_ancestor(key).is_some()
   }
@@ -674,10 +677,10 @@ where
   #[inline]
   pub fn ancestors<K>(&self, key: &K) -> Ancestors<'_, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     Ancestors {
-      inner: self.working.ancestors(key.components()),
+      inner: self.working.ancestors::<K, _>(key.components()),
     }
   }
 
@@ -686,10 +689,10 @@ where
   #[inline]
   pub fn descendants<K>(&self, key: &K) -> Descendants<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     Descendants {
-      inner: self.working.descendants(key.components()),
+      inner: self.working.descendants::<K, _>(key.components()),
     }
   }
 
@@ -699,10 +702,10 @@ where
   #[inline]
   pub fn descendants_inclusive<K>(&self, key: &K) -> Descendants<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     Descendants {
-      inner: self.working.descendants_inclusive(key.components()),
+      inner: self.working.descendants_inclusive::<K, _>(key.components()),
     }
   }
 
@@ -712,11 +715,13 @@ where
   #[must_use]
   pub fn walk_prefix<K>(&self, prefix: &K) -> Range<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
     Range {
-      inner: self.working.prefix_entries(prefix.components(), true),
+      inner: self
+        .working
+        .prefix_entries::<K, _>(prefix.components(), true),
     }
   }
 
@@ -725,11 +730,13 @@ where
   #[must_use]
   pub fn walk_prefix_strict<K>(&self, prefix: &K) -> Range<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
     Range {
-      inner: self.working.prefix_entries(prefix.components(), false),
+      inner: self
+        .working
+        .prefix_entries::<K, _>(prefix.components(), false),
     }
   }
 
@@ -739,10 +746,10 @@ where
   #[must_use]
   pub fn walk_path<K>(&self, key: &K) -> PathEntries<'_, C, V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
     C: Clone,
   {
-    PathEntries::new(self.working.ancestor_entries(key.components()))
+    PathEntries::new(self.working.ancestor_entries::<K, _>(key.components()))
   }
 }
 
@@ -755,17 +762,17 @@ where
   /// the key was set.
   pub fn insert<K>(&mut self, key: &K, value: V) -> Option<V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.insert(key.components(), value)
+    self.working.insert::<K, _>(key.components(), value)
   }
 
   /// Removes and returns the value at exactly `key` in the working copy, if any.
   pub fn remove<K>(&mut self, key: &K) -> Option<V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.remove(|| key.components())
+    self.working.remove::<K, _, _>(|| key.components())
   }
 
   /// Removes every *strict* descendant of `key` (the value at `key`, if any, is
@@ -773,18 +780,22 @@ where
   /// the copy-on-write path to `key` may be duplicated, as in every mutator.
   pub fn remove_descendants<K>(&mut self, key: &K) -> usize
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.remove_descendants(|| key.components())
+    self
+      .working
+      .remove_descendants::<K, _, _>(|| key.components())
   }
 
   /// Removes every *strict* descendant of `key` and returns their values (the
   /// value at `key`, if any, is kept). Clones values out before unlinking.
   pub fn drain_descendants<K>(&mut self, key: &K) -> Vec<V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.drain_descendants(|| key.components())
+    self
+      .working
+      .drain_descendants::<K, _, _>(|| key.components())
   }
 
   /// Removes the value at `key` **and** every strict descendant (node-inclusive;
@@ -796,9 +807,9 @@ where
   /// mutator.
   pub fn delete_prefix<K>(&mut self, key: &K) -> usize
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.delete_prefix(|| key.components())
+    self.working.delete_prefix::<K, _, _>(|| key.components())
   }
 
   /// Removes the value at `key` **and** every strict descendant (node-inclusive)
@@ -806,9 +817,9 @@ where
   /// if any, first). Clones values out before unlinking.
   pub fn drain_prefix<K>(&mut self, key: &K) -> Vec<V>
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.drain_prefix(|| key.components())
+    self.working.drain_prefix::<K, _, _>(|| key.components())
   }
 }
 
@@ -969,11 +980,11 @@ impl<'a, C, V> Iterator for PathEntries<'a, C, V> {
 fn materialize_bound<C, K>(bound: Bound<&K>) -> Bound<Vec<C>>
 where
   C: Clone,
-  K: RadixKey<Component = C> + ?Sized,
+  K: RadixKey<Owned = C> + ?Sized,
 {
   match bound {
-    Bound::Included(k) => Bound::Included(k.components().map(|c| c.borrow().clone()).collect()),
-    Bound::Excluded(k) => Bound::Excluded(k.components().map(|c| c.borrow().clone()).collect()),
+    Bound::Included(k) => Bound::Included(k.components().map(K::to_owned).collect()),
+    Bound::Excluded(k) => Bound::Excluded(k.components().map(K::to_owned).collect()),
     Bound::Unbounded => Bound::Unbounded,
   }
 }

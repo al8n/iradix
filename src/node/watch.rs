@@ -63,10 +63,10 @@ where
   /// existing node on its path. Because copy-on-write path-copies every ancestor of
   /// a change, listening on this slot fires on any change to `key` or anything
   /// beneath it.
-  pub(crate) fn watch_slot<I>(&self, key: I) -> &WatchSlot
+  pub(crate) fn watch_slot<'k, K, I>(&self, key: I) -> &WatchSlot
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let mut node = self;
     let mut key = key.peekable();
@@ -74,11 +74,11 @@ where
       let Some(first) = key.peek() else {
         return &node.watch;
       };
-      let Ok(i) = node.child_index(first.borrow()) else {
+      let Ok(i) = node.child_index_cmp::<K>(first.clone()) else {
         return &node.watch;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared == edge.label.len() {
         node = &edge.child;
       } else {
@@ -298,12 +298,12 @@ where
   /// The change slot to listen on for `key`, or `None` only when the trie is empty
   /// (no root node exists; the caller supplies its own empty-position slot). See
   /// [`Node::watch_slot`].
-  pub(crate) fn watch_slot<I>(&self, key: I) -> Option<&WatchSlot>
+  pub(crate) fn watch_slot<'k, K, I>(&self, key: I) -> Option<&WatchSlot>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
-    self.root.as_ref().map(|root| root.watch_slot(key))
+    self.root.as_ref().map(|root| root.watch_slot::<K, _>(key))
   }
 
   /// Collects the change slot of every node a newly published version replaced or

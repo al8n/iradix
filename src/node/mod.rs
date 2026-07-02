@@ -20,9 +20,11 @@
 
 use std::{boxed::Box, vec, vec::Vec};
 
-use core::{borrow::Borrow, cmp::Ordering, ops::Bound};
+use core::{cmp::Ordering, ops::Bound};
 
 use archery::{SharedPointer, SharedPointerKind};
+
+use crate::RadixKey;
 
 /// A subtree root paired with its reconstructed key, as returned by
 /// [`Node::prefix_seed`].
@@ -144,23 +146,42 @@ where
   C: Ord,
   P: SharedPointerKind,
 {
-  /// Binary-searches children for the edge whose label begins with `first`.
+  /// Binary-searches children for the edge whose label begins with a stored `first`
+  /// component (stored-vs-stored, via `C: Ord`).
   ///
   /// `Ok(i)` indexes the matching edge; `Err(i)` is the insertion point that
-  /// keeps `children` sorted by first component.
+  /// keeps `children` sorted by first component. Used by the ordered / seed paths,
+  /// where the query component is already an owned `C`.
   #[inline]
   pub(crate) fn child_index(&self, first: &C) -> Result<usize, usize> {
     self
       .children
-      .binary_search_by(|edge| Borrow::<C>::borrow(&edge.label[0]).cmp(first))
+      .binary_search_by(|edge| edge.label[0].cmp(first))
+  }
+
+  /// Binary-searches children for the edge whose label begins with a **walked**
+  /// component, comparing a stored owned first component against the walked one via
+  /// [`K::compare`](RadixKey::compare) — the descent step (`first` borrows from the
+  /// key being looked up, and `K::Owned == C`).
+  ///
+  /// `Ok(i)` indexes the matching edge; `Err(i)` is the insertion point. Consistent
+  /// with [`child_index`](Self::child_index) because `compare` agrees with `Owned: Ord`.
+  #[inline]
+  pub(crate) fn child_index_cmp<K>(&self, first: K::Component<'_>) -> Result<usize, usize>
+  where
+    K: RadixKey<Owned = C> + ?Sized,
+  {
+    self
+      .children
+      .binary_search_by(|edge| K::compare(&edge.label[0], first.clone()))
   }
 
   /// Returns a reference to the value stored at exactly the components yielded by
   /// `key`, if any. Zero allocation: `key` is walked lazily.
-  pub(crate) fn get<I>(&self, key: I) -> Option<&V>
+  pub(crate) fn get<'k, K, I>(&self, key: I) -> Option<&V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let mut node = self;
     let mut key = key.peekable();
@@ -168,9 +189,9 @@ where
       let Some(first) = key.peek() else {
         return node.value.as_ref();
       };
-      let i = node.child_index(first.borrow()).ok()?;
+      let i = node.child_index_cmp::<K>(first.clone()).ok()?;
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared != edge.label.len() {
         return None;
       }
@@ -180,10 +201,10 @@ where
 
   /// Returns the value of the deepest stored key that is a prefix of `key`. When
   /// `inclusive`, an exact match counts as its own ancestor.
-  pub(crate) fn ancestor<I>(&self, key: I, inclusive: bool) -> Option<&V>
+  pub(crate) fn ancestor<'k, K, I>(&self, key: I, inclusive: bool) -> Option<&V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let mut node = self;
     let mut key = key.peekable();
@@ -198,11 +219,11 @@ where
       let Some(first) = key.peek() else {
         return deepest;
       };
-      let Ok(i) = node.child_index(first.borrow()) else {
+      let Ok(i) = node.child_index_cmp::<K>(first.clone()) else {
         return deepest;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared != edge.label.len() {
         // diverged inside this edge: nothing deeper can match
         return deepest;
@@ -213,10 +234,10 @@ where
 
   /// Collects references to the values of every stored key that is a prefix of
   /// `key`, inclusive of an exact match, in root-to-`key` order.
-  pub(crate) fn ancestors<I>(&self, key: I) -> Vec<&V>
+  pub(crate) fn ancestors<'k, K, I>(&self, key: I) -> Vec<&V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let mut found = Vec::new();
     let mut node = self;
@@ -226,11 +247,11 @@ where
         found.push(v);
       }
       let Some(first) = key.peek() else { break };
-      let Ok(i) = node.child_index(first.borrow()) else {
+      let Ok(i) = node.child_index_cmp::<K>(first.clone()) else {
         break;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared != edge.label.len() {
         break;
       }
@@ -242,10 +263,10 @@ where
   /// Collects `(key, value)` for every stored key that is a prefix of `key`,
   /// inclusive of an exact match, in root-to-`key` (ascending) order — the
   /// key-carrying form of [`ancestors`](Self::ancestors).
-  pub(crate) fn ancestor_entries<I>(&self, key: I) -> Vec<(Vec<C>, &V)>
+  pub(crate) fn ancestor_entries<'k, K, I>(&self, key: I) -> Vec<(Vec<C>, &V)>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
     C: Clone,
   {
     let mut found = Vec::new();
@@ -257,11 +278,11 @@ where
         found.push((dup_key::<C>(&acc), v));
       }
       let Some(first) = key.peek() else { break };
-      let Ok(i) = node.child_index(first.borrow()) else {
+      let Ok(i) = node.child_index_cmp::<K>(first.clone()) else {
         break;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared != edge.label.len() {
         break;
       }
@@ -280,24 +301,24 @@ where
   /// Iterates references to the values of every *strict* descendant of `key`, in
   /// key order.
   #[inline]
-  pub(crate) fn descendant_iter<I>(&self, key: I) -> ValueIter<'_, P, C, V>
+  pub(crate) fn descendant_iter<'k, K, I>(&self, key: I) -> ValueIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     // `ValueIter` pops from the back, so the seed roots (collected in ascending
     // first-component order) are reversed to make the smallest subtree pop first.
-    let mut roots = self.descendant_roots(key);
+    let mut roots = self.descendant_roots::<K, _>(key);
     roots.reverse();
     ValueIter::from_stack(roots)
   }
 
   /// Returns the subtree roots whose union is exactly the *strict* descendants of
   /// `key` (the value at `key` itself is excluded).
-  fn descendant_roots<I>(&self, key: I) -> Vec<&Node<P, C, V>>
+  fn descendant_roots<'k, K, I>(&self, key: I) -> Vec<&Node<P, C, V>>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let mut node = self;
     let mut key = key.peekable();
@@ -306,11 +327,11 @@ where
         // key ends exactly at `node`: descendants are everything strictly below.
         return node.children.iter().map(|edge| &*edge.child).collect();
       };
-      let Ok(i) = node.child_index(first.borrow()) else {
+      let Ok(i) = node.child_index_cmp::<K>(first.clone()) else {
         return Vec::new();
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared == edge.label.len() {
         node = &edge.child;
       } else if key.peek().is_none() {
@@ -372,12 +393,12 @@ where
   /// Iterates references to the values of every *strict* descendant of `key`, in
   /// reverse key order.
   #[inline]
-  fn descendant_rev_iter<I>(&self, key: I) -> RevValueIter<'_, P, C, V>
+  fn descendant_rev_iter<'k, K, I>(&self, key: I) -> RevValueIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
-    RevValueIter::from_nodes(self.descendant_roots(key))
+    RevValueIter::from_nodes(self.descendant_roots::<K, _>(key))
   }
 
   /// Builds an ascending cursor over the entries whose key lies within
@@ -432,10 +453,10 @@ where
   /// prefix (inclusive of the key itself): the node reached when `key` is fully
   /// consumed at a node boundary, or the child at the far end of the edge when
   /// `key` ends mid-edge. `None` if no key has `key` as a prefix.
-  fn prefix_node<I>(&self, key: I) -> Option<&Node<P, C, V>>
+  fn prefix_node<'k, K, I>(&self, key: I) -> Option<&Node<P, C, V>>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let mut node = self;
     let mut key = key.peekable();
@@ -443,11 +464,11 @@ where
       let Some(first) = key.peek() else {
         return Some(node);
       };
-      let Ok(i) = node.child_index(first.borrow()) else {
+      let Ok(i) = node.child_index_cmp::<K>(first.clone()) else {
         return None;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared == edge.label.len() {
         node = &edge.child;
       } else if key.peek().is_none() {
@@ -463,12 +484,12 @@ where
   /// value at `key` itself**, in key order (the node-inclusive mirror of
   /// [`descendant_iter`](Self::descendant_iter)).
   #[inline]
-  fn descendant_iter_inclusive<I>(&self, key: I) -> ValueIter<'_, P, C, V>
+  fn descendant_iter_inclusive<'k, K, I>(&self, key: I) -> ValueIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
-    match self.prefix_node(key) {
+    match self.prefix_node::<K, _>(key) {
       Some(node) => ValueIter::from_stack(std::vec![node]),
       None => ValueIter::empty(),
     }
@@ -479,10 +500,10 @@ where
   /// yields the single prefix node; strict yields its children (the value at the
   /// prefix key is excluded). Empty if no stored key has `key` as a prefix. The
   /// key-carrying, inclusive-capable form of [`descendant_roots`](Self::descendant_roots).
-  fn prefix_seed<I>(&self, key: I, inclusive: bool) -> Vec<PrefixRoot<'_, P, C, V>>
+  fn prefix_seed<'k, K, I>(&self, key: I, inclusive: bool) -> Vec<PrefixRoot<'_, P, C, V>>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
     C: Clone,
   {
     let mut node = self;
@@ -504,11 +525,11 @@ where
           })
           .collect();
       };
-      let Ok(i) = node.child_index(first.borrow()) else {
+      let Ok(i) = node.child_index_cmp::<K>(first.clone()) else {
         return Vec::new();
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<C, _>(&edge.label, &mut key);
+      let shared = match_prefix::<K, _>(&edge.label, &mut key);
       if shared == edge.label.len() {
         extend_key::<C>(&mut acc, &edge.label);
         node = &edge.child;
@@ -526,16 +547,16 @@ where
 
   /// Forward `(key, value)` cursor over the entries having `key` as a prefix
   /// (node-`inclusive`, or strict), in ascending key order.
-  fn prefix_range_iter<I>(&self, key: I, inclusive: bool) -> RangeIter<'_, P, C, V>
+  fn prefix_range_iter<'k, K, I>(&self, key: I, inclusive: bool) -> RangeIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
     C: Clone,
   {
     // `RangeIter` pops from the top, so push the ascending roots largest-first —
     // the smallest is expanded first, giving ascending output.
     let mut stack = Vec::new();
-    for (node, k) in self.prefix_seed(key, inclusive).into_iter().rev() {
+    for (node, k) in self.prefix_seed::<K, _>(key, inclusive).into_iter().rev() {
       stack.push(RangeFrame::Node { node, key: k });
     }
     RangeIter {
@@ -547,16 +568,16 @@ where
 
   /// Reverse `(key, value)` cursor over the entries having `key` as a prefix
   /// (node-`inclusive`, or strict), in descending key order.
-  fn prefix_rev_range_iter<I>(&self, key: I, inclusive: bool) -> RevRangeIter<'_, P, C, V>
+  fn prefix_rev_range_iter<'k, K, I>(&self, key: I, inclusive: bool) -> RevRangeIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
     C: Clone,
   {
     // `RevRangeIter` pops from the top, so push the ascending roots smallest-first —
     // the largest is expanded first, giving descending output.
     let mut stack = Vec::new();
-    for (node, k) in self.prefix_seed(key, inclusive) {
+    for (node, k) in self.prefix_seed::<K, _>(key, inclusive) {
       stack.push(RangeFrame::Node { node, key: k });
     }
     RevRangeIter {
@@ -580,14 +601,14 @@ where
   /// `key` is consumed lazily (mirroring the read path): only the components
   /// actually STORED — the new leaf's or split-suffix label — are cloned, so no
   /// whole-key `Vec` is materialized.
-  pub(crate) fn insert<I>(
+  pub(crate) fn insert<'k, K, I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
     key: &mut core::iter::Peekable<I>,
     value: V,
   ) -> Option<V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let node = SharedPointer::make_mut(node_ptr);
 
@@ -595,15 +616,13 @@ where
       return node.value.replace(value);
     }
 
-    let first = key.peek().expect("key has a next component").borrow();
-    let i = match node.child_index(first) {
+    let first = key.peek().expect("key has a next component").clone();
+    let i = match node.child_index_cmp::<K>(first) {
       Err(insert_at) => {
         // No edge begins with `first`: the new leaf's label is the WHOLE remaining
-        // key. Consuming the iterator yields the peeked `first` too.
-        let label: Box<[C]> = key
-          .map(|c| c.borrow().clone())
-          .collect::<Vec<C>>()
-          .into_boxed_slice();
+        // key. Consuming the iterator yields the peeked `first` too. `to_owned` is the
+        // sole allocation of the key walk (for a `Path`, one `OsString` per component).
+        let label: Box<[C]> = key.map(K::to_owned).collect::<Vec<C>>().into_boxed_slice();
         let leaf = Node {
           value: Some(value),
           children: Vec::new(),
@@ -620,13 +639,13 @@ where
       Ok(i) => i,
     };
 
-    let shared = match_prefix::<C, _>(&node.children[i].label, key);
+    let shared = match_prefix::<K, _>(&node.children[i].label, key);
     let label_len = node.children[i].label.len();
 
     if shared == label_len {
       // The whole edge label is consumed; descend into the child with the same
       // (now-advanced) key iterator.
-      return Node::insert(&mut node.children[i].child, key, value);
+      return Node::insert::<K, _>(&mut node.children[i].child, key, value);
     }
 
     // Split edge `i` at `shared`. Build the COMPLETE replacement `mid` subtree —
@@ -637,7 +656,7 @@ where
     // before anything is detached, so an unwind leaves the trie and `len`
     // untouched. Only the final single move splices `mid` in, dropping the old
     // edge (whose child was already cloned, so no subtree is lost).
-    let key_rest: Vec<C> = key.map(|c| c.borrow().clone()).collect();
+    let key_rest: Vec<C> = key.map(K::to_owned).collect();
     let (head, tail) = node.children[i].label.split_at(shared);
     let head: Box<[C]> = head.to_vec().into_boxed_slice();
     let tail: Box<[C]> = tail.to_vec().into_boxed_slice();
@@ -666,7 +685,7 @@ where
           watch: WatchSlot::new(),
         }),
       };
-      if Borrow::<C>::borrow(&new_leaf.label[0]) < Borrow::<C>::borrow(&old_child_edge.label[0]) {
+      if new_leaf.label[0] < old_child_edge.label[0] {
         Node {
           value: None,
           children: vec![new_leaf, old_child_edge],
@@ -697,14 +716,14 @@ where
   /// `key` is consumed lazily (mirroring [`insert`](Node::insert) and the read
   /// path): each matched edge label is walked through the same `Peekable`, so no
   /// whole-key `Vec` is materialized.
-  pub(crate) fn remove<I>(
+  pub(crate) fn remove<'k, K, I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
     key: &mut core::iter::Peekable<I>,
     len: &mut usize,
   ) -> Option<V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let node = SharedPointer::make_mut(node_ptr);
 
@@ -720,16 +739,16 @@ where
       return removed;
     }
 
-    let first = key.peek().expect("key has a next component").borrow();
-    let i = node.child_index(first).ok()?;
-    let shared = match_prefix::<C, _>(&node.children[i].label, key);
+    let first = key.peek().expect("key has a next component").clone();
+    let i = node.child_index_cmp::<K>(first).ok()?;
+    let shared = match_prefix::<K, _>(&node.children[i].label, key);
     if shared != node.children[i].label.len() {
       // The key diverges within this edge (or runs out mid-edge): no exact match
       // below, so nothing to remove.
       return None;
     }
 
-    let removed = Node::remove(&mut node.children[i].child, key, len);
+    let removed = Node::remove::<K, _>(&mut node.children[i].child, key, len);
     if removed.is_some() {
       normalize_child(node, i);
     }
@@ -747,14 +766,14 @@ where
   /// unwind during re-compression leaves `len` already accurate with every
   /// surviving key resolvable. Callers still capture any values they need first
   /// (see [`crate::unsync::Radix::drain_descendants`]).
-  pub(crate) fn unlink_descendants<I>(
+  pub(crate) fn unlink_descendants<'k, K, I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
     key: &mut core::iter::Peekable<I>,
     len: &mut usize,
   ) -> usize
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let node = SharedPointer::make_mut(node_ptr);
 
@@ -768,18 +787,18 @@ where
       return removed;
     }
 
-    let first = key.peek().expect("key has a next component").borrow();
-    let Ok(i) = node.child_index(first) else {
+    let first = key.peek().expect("key has a next component").clone();
+    let Ok(i) = node.child_index_cmp::<K>(first) else {
       return 0;
     };
-    let shared = match_prefix::<C, _>(&node.children[i].label, key);
+    let shared = match_prefix::<K, _>(&node.children[i].label, key);
     let label_len = node.children[i].label.len();
 
     if shared == label_len {
       // Whole label consumed: recurse (which unlinks and corrects `len` deeper),
       // then re-canonicalize this node — the (fallible) normalize runs only after
       // the deeper unlink already adjusted `len`.
-      let removed = Node::unlink_descendants(&mut node.children[i].child, key, len);
+      let removed = Node::unlink_descendants::<K, _>(&mut node.children[i].child, key, len);
       if removed > 0 {
         normalize_child(node, i);
       }
@@ -812,14 +831,14 @@ where
   /// on the way up.
   ///
   /// [`unlink_descendants`]: Node::unlink_descendants
-  pub(crate) fn unlink_prefix<I>(
+  pub(crate) fn unlink_prefix<'k, K, I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
     key: &mut core::iter::Peekable<I>,
     len: &mut usize,
   ) -> usize
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     // PRECONDITION: `key` is non-empty. The whole-trie (empty-prefix) case is
     // handled by the `Root` wrapper dropping its root pointer, so we never
@@ -831,12 +850,12 @@ where
     let first = key
       .peek()
       .expect("unlink_prefix requires a non-empty key")
-      .borrow();
+      .clone();
 
-    let Ok(i) = node.child_index(first) else {
+    let Ok(i) = node.child_index_cmp::<K>(first) else {
       return 0;
     };
-    let shared = match_prefix::<C, _>(&node.children[i].label, key);
+    let shared = match_prefix::<K, _>(&node.children[i].label, key);
     let label_len = node.children[i].label.len();
 
     if key.peek().is_none() {
@@ -855,7 +874,7 @@ where
     } else if shared == label_len {
       // Whole label consumed and `key` continues: recurse, then re-canonicalize
       // this node (which may now have a pruned-empty or single-child child).
-      let removed = Node::unlink_prefix(&mut node.children[i].child, key, len);
+      let removed = Node::unlink_prefix::<K, _>(&mut node.children[i].child, key, len);
       if removed > 0 {
         normalize_child(node, i);
       }
@@ -934,23 +953,23 @@ where
 {
   /// Returns a reference to the value stored at exactly `key`, if any.
   #[inline]
-  pub(crate) fn get<I>(&self, key: I) -> Option<&V>
+  pub(crate) fn get<'k, K, I>(&self, key: I) -> Option<&V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
-    self.root.as_ref()?.get(key)
+    self.root.as_ref()?.get::<K, _>(key)
   }
 
   /// Returns the value of the deepest stored prefix of `key`; `inclusive` decides
   /// whether an exact match is its own ancestor.
   #[inline]
-  pub(crate) fn ancestor<I>(&self, key: I, inclusive: bool) -> Option<&V>
+  pub(crate) fn ancestor<'k, K, I>(&self, key: I, inclusive: bool) -> Option<&V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
-    self.root.as_ref()?.ancestor(key, inclusive)
+    self.root.as_ref()?.ancestor::<K, _>(key, inclusive)
   }
 
   /// Iterates references to every value in the trie, in key order.
@@ -964,26 +983,26 @@ where
 
   /// Iterates references to the values of `key`'s ancestors (inclusive).
   #[inline]
-  pub(crate) fn ancestors<'a, I>(&'a self, key: I) -> SliceIter<'a, V>
+  pub(crate) fn ancestors<'a, 'k, K, I>(&'a self, key: I) -> SliceIter<'a, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     match self.root.as_ref() {
-      Some(root) => SliceIter::new(root.ancestors(key)),
+      Some(root) => SliceIter::new(root.ancestors::<K, _>(key)),
       None => SliceIter::new(Vec::new()),
     }
   }
 
   /// Iterates references to the values of `key`'s strict descendants.
   #[inline]
-  pub(crate) fn descendants<I>(&self, key: I) -> ValueIter<'_, P, C, V>
+  pub(crate) fn descendants<'k, K, I>(&self, key: I) -> ValueIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     match self.root.as_ref() {
-      Some(root) => root.descendant_iter(key),
+      Some(root) => root.descendant_iter::<K, _>(key),
       None => ValueIter::empty(),
     }
   }
@@ -1018,13 +1037,13 @@ where
   /// Iterates references to the values of `key`'s strict descendants, in reverse
   /// key order.
   #[inline]
-  pub(crate) fn descendants_rev<I>(&self, key: I) -> RevValueIter<'_, P, C, V>
+  pub(crate) fn descendants_rev<'k, K, I>(&self, key: I) -> RevValueIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     match self.root.as_ref() {
-      Some(root) => root.descendant_rev_iter(key),
+      Some(root) => root.descendant_rev_iter::<K, _>(key),
       None => RevValueIter::empty(),
     }
   }
@@ -1063,13 +1082,13 @@ where
   /// value at `key` itself** (the node-inclusive mirror of
   /// [`descendants`](Self::descendants)).
   #[inline]
-  pub(crate) fn descendants_inclusive<I>(&self, key: I) -> ValueIter<'_, P, C, V>
+  pub(crate) fn descendants_inclusive<'k, K, I>(&self, key: I) -> ValueIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     match self.root.as_ref() {
-      Some(root) => root.descendant_iter_inclusive(key),
+      Some(root) => root.descendant_iter_inclusive::<K, _>(key),
       None => ValueIter::empty(),
     }
   }
@@ -1077,14 +1096,14 @@ where
   /// Forward `(key, value)` cursor over the entries having `key` as a prefix
   /// (node-`inclusive`, or strict), ascending.
   #[inline]
-  pub(crate) fn prefix_entries<I>(&self, key: I, inclusive: bool) -> RangeIter<'_, P, C, V>
+  pub(crate) fn prefix_entries<'k, K, I>(&self, key: I, inclusive: bool) -> RangeIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
     C: Clone,
   {
     match self.root.as_ref() {
-      Some(root) => root.prefix_range_iter(key, inclusive),
+      Some(root) => root.prefix_range_iter::<K, _>(key, inclusive),
       None => RangeIter::empty(),
     }
   }
@@ -1092,14 +1111,18 @@ where
   /// Reverse `(key, value)` cursor over the entries having `key` as a prefix
   /// (node-`inclusive`, or strict), descending.
   #[inline]
-  pub(crate) fn prefix_entries_rev<I>(&self, key: I, inclusive: bool) -> RevRangeIter<'_, P, C, V>
+  pub(crate) fn prefix_entries_rev<'k, K, I>(
+    &self,
+    key: I,
+    inclusive: bool,
+  ) -> RevRangeIter<'_, P, C, V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
     C: Clone,
   {
     match self.root.as_ref() {
-      Some(root) => root.prefix_rev_range_iter(key, inclusive),
+      Some(root) => root.prefix_rev_range_iter::<K, _>(key, inclusive),
       None => RevRangeIter::empty(),
     }
   }
@@ -1107,14 +1130,14 @@ where
   /// Collects `(key, value)` for every stored key that is a prefix of `key`
   /// (inclusive), in root-to-`key` order.
   #[inline]
-  pub(crate) fn ancestor_entries<I>(&self, key: I) -> Vec<(Vec<C>, &V)>
+  pub(crate) fn ancestor_entries<'k, K, I>(&self, key: I) -> Vec<(Vec<C>, &V)>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
     C: Clone,
   {
     match self.root.as_ref() {
-      Some(root) => root.ancestor_entries(key),
+      Some(root) => root.ancestor_entries::<K, _>(key),
       None => Vec::new(),
     }
   }
@@ -1129,16 +1152,16 @@ where
   /// Inserts `value` at the components yielded by `key`, returning the previous
   /// value if the key was set. `key` is consumed lazily; only stored components are
   /// cloned (no whole-key `Vec`).
-  pub(crate) fn insert<I>(&mut self, key: I, value: V) -> Option<V>
+  pub(crate) fn insert<'k, K, I>(&mut self, key: I, value: V) -> Option<V>
   where
-    I: Iterator,
-    I::Item: Borrow<C>,
+    K: RadixKey<Owned = C> + ?Sized + 'k,
+    I: Iterator<Item = K::Component<'k>>,
   {
     let mut key = key.peekable();
     let root = self
       .root
       .get_or_insert_with(|| SharedPointer::new(Node::new()));
-    let old = Node::insert(root, &mut key, value);
+    let old = Node::insert::<K, _>(root, &mut key, value);
     if old.is_none() {
       self.len += 1;
     }
@@ -1154,44 +1177,46 @@ where
   /// whole-key `Vec` — both passes walk the key lazily. Correctness relies on the
   /// [`RadixKey`](crate::RadixKey) determinism contract (each call yields the same
   /// components); the public wrappers pass `|| key.components()`.
-  pub(crate) fn remove<F, I>(&mut self, make_key: F) -> Option<V>
+  pub(crate) fn remove<'k, K, F, I>(&mut self, make_key: F) -> Option<V>
   where
+    K: RadixKey<Owned = C> + ?Sized + 'k,
     F: Fn() -> I,
-    I: Iterator,
-    I::Item: Borrow<C>,
+    I: Iterator<Item = K::Component<'k>>,
   {
     // A read-only existence check first: a remove of an absent key must not
     // copy-on-write (and so must not disturb structural sharing). When the key
     // is present, every node on its root-to-value path genuinely changes, so the
     // eager copy-on-write in `Node::remove` is justified.
-    self.get(make_key())?;
+    self.get::<K, _>(make_key())?;
     let root = self.root.as_mut()?;
     // `Node::remove` decrements `len` at the value-`take` itself — after its
     // fallible make-mut/traversal succeeds — so a panic in a shared-node clone or
     // a user comparison on the way down leaves `len` and the trie consistent.
-    Node::remove(root, &mut make_key().peekable(), &mut self.len)
+    Node::remove::<K, _>(root, &mut make_key().peekable(), &mut self.len)
   }
 
   /// Removes every *strict* descendant of the components yielded by `make_key`
   /// (the value at the key, if any, is kept), returning the number of values
   /// removed. Never clones a `V`. Two-pass over `make_key` (existence, then
   /// unlink); see [`Root::remove`] for the contract.
-  pub(crate) fn remove_descendants<F, I>(&mut self, make_key: F) -> usize
+  pub(crate) fn remove_descendants<'k, K, F, I>(&mut self, make_key: F) -> usize
   where
+    K: RadixKey<Owned = C> + ?Sized + 'k,
     F: Fn() -> I,
-    I: Iterator,
-    I::Item: Borrow<C>,
+    I: Iterator<Item = K::Component<'k>>,
   {
     // Read-only existence check: nothing to remove means no copy-on-write (so
     // structural sharing is preserved) and no `len` change. This traversal is
     // fallible (user comparisons) but mutates nothing, so a panic is harmless.
-    if self.descendants(make_key()).next().is_none() {
+    if self.descendants::<K, _>(make_key()).next().is_none() {
       return 0;
     }
     // `unlink_descendants` counts and unlinks the strict descendants, correcting
     // `len` atomically with the (infallible) unlink — and never cloning a `V`.
     match self.root.as_mut() {
-      Some(root) => Node::unlink_descendants(root, &mut make_key().peekable(), &mut self.len),
+      Some(root) => {
+        Node::unlink_descendants::<K, _>(root, &mut make_key().peekable(), &mut self.len)
+      }
       None => 0,
     }
   }
@@ -1200,25 +1225,25 @@ where
   /// returns their values (the value at the key, if any, is kept). Clones values
   /// out before unlinking. Two-pass over `make_key` (capture, then unlink); see
   /// [`Root::remove`] for the contract.
-  pub(crate) fn drain_descendants<F, I>(&mut self, make_key: F) -> Vec<V>
+  pub(crate) fn drain_descendants<'k, K, F, I>(&mut self, make_key: F) -> Vec<V>
   where
+    K: RadixKey<Owned = C> + ?Sized + 'k,
     F: Fn() -> I,
-    I: Iterator,
-    I::Item: Borrow<C>,
+    I: Iterator<Item = K::Component<'k>>,
   {
     // Phase 1 (read-only, fallible): clone every strict-descendant value out
     // FIRST, before unlinking anything. A `V::clone` panic here unwinds with the
     // trie and `len` completely untouched. This also doubles as the
     // nothing-to-drain check: an empty result means no copy-on-write (preserving
     // structural sharing).
-    let out: Vec<V> = self.descendants(make_key()).cloned().collect();
+    let out: Vec<V> = self.descendants::<K, _>(make_key()).cloned().collect();
     if out.is_empty() {
       return out;
     }
     // Phase 2: the values are safely captured, so commit the structural change.
     // `unlink_descendants` corrects `len` atomically with the (infallible) unlink.
     if let Some(root) = self.root.as_mut() {
-      Node::unlink_descendants(root, &mut make_key().peekable(), &mut self.len);
+      Node::unlink_descendants::<K, _>(root, &mut make_key().peekable(), &mut self.len);
     }
     out
   }
@@ -1228,11 +1253,11 @@ where
   /// *removed* value — only the copy-on-write path to the key is duplicated, exactly
   /// like every other mutator. Two-pass over `make_key` (existence, then unlink);
   /// see [`Root::remove`] for the contract.
-  pub(crate) fn delete_prefix<F, I>(&mut self, make_key: F) -> usize
+  pub(crate) fn delete_prefix<'k, K, F, I>(&mut self, make_key: F) -> usize
   where
+    K: RadixKey<Owned = C> + ?Sized + 'k,
     F: Fn() -> I,
-    I: Iterator,
-    I::Item: Borrow<C>,
+    I: Iterator<Item = K::Component<'k>>,
   {
     if make_key().next().is_none() {
       // Whole-trie delete: drop the root pointer outright. No `make_mut`, so not
@@ -1246,8 +1271,8 @@ where
     // nothing to remove, so skip the copy-on-write entirely (preserving structural
     // sharing) and leave `len` alone. The traversal is fallible (user comparisons)
     // but mutates nothing, so a panic here is harmless.
-    let nothing_here =
-      self.get(make_key()).is_none() && self.descendants(make_key()).next().is_none();
+    let nothing_here = self.get::<K, _>(make_key()).is_none()
+      && self.descendants::<K, _>(make_key()).next().is_none();
     if nothing_here {
       return 0;
     }
@@ -1255,7 +1280,7 @@ where
     // `len` atomically with the (infallible) unlink — unlinking the edge rather than
     // copying the doomed subtree, so no removed value is cloned.
     match self.root.as_mut() {
-      Some(root) => Node::unlink_prefix(root, &mut make_key().peekable(), &mut self.len),
+      Some(root) => Node::unlink_prefix::<K, _>(root, &mut make_key().peekable(), &mut self.len),
       None => 0,
     }
   }
@@ -1265,11 +1290,11 @@ where
   /// (the value at the key itself, if any, first). Clones values out before
   /// unlinking. Two-pass over `make_key` (capture, then unlink); see
   /// [`Root::remove`] for the contract.
-  pub(crate) fn drain_prefix<F, I>(&mut self, make_key: F) -> Vec<V>
+  pub(crate) fn drain_prefix<'k, K, F, I>(&mut self, make_key: F) -> Vec<V>
   where
+    K: RadixKey<Owned = C> + ?Sized + 'k,
     F: Fn() -> I,
-    I: Iterator,
-    I::Item: Borrow<C>,
+    I: Iterator<Item = K::Component<'k>>,
   {
     if make_key().next().is_none() {
       // Whole-trie drain: capture every value (the key is empty, so no key walk is
@@ -1285,10 +1310,10 @@ where
     // `len` completely untouched. The emptiness check also doubles as the
     // nothing-to-drain guard: an empty result means no copy-on-write.
     let mut out: Vec<V> = Vec::new();
-    if let Some(v) = self.get(make_key()) {
+    if let Some(v) = self.get::<K, _>(make_key()) {
       out.push(v.clone());
     }
-    out.extend(self.descendants(make_key()).cloned());
+    out.extend(self.descendants::<K, _>(make_key()).cloned());
     if out.is_empty() {
       return out;
     }
@@ -1296,7 +1321,7 @@ where
     // `unlink_prefix` unlinks the doomed edge rather than copying the subtree, so it
     // never re-clones the values phase 1 already captured.
     if let Some(root) = self.root.as_mut() {
-      Node::unlink_prefix(root, &mut make_key().peekable(), &mut self.len);
+      Node::unlink_prefix::<K, _>(root, &mut make_key().peekable(), &mut self.len);
     }
     out
   }
@@ -1452,18 +1477,20 @@ where
   }
 }
 
-/// Length of the longest common prefix between a stored `label` and the query
-/// components remaining in `key`. Consumes the matched components from `key`.
-pub(crate) fn match_prefix<C, I>(label: &[C], key: &mut core::iter::Peekable<I>) -> usize
+/// Length of the longest common prefix between a stored `label` and the walked
+/// components remaining in `key`, comparing each stored component against the walked
+/// one via [`K::compare`](RadixKey::compare) (`K::Owned == C`). Consumes the matched
+/// components from `key`. The walked component is `Clone` (per [`RadixKey::Component`]),
+/// so it can be cloned out of the peek for the comparison without disturbing `key`.
+pub(crate) fn match_prefix<'k, K, I>(label: &[K::Owned], key: &mut core::iter::Peekable<I>) -> usize
 where
-  C: PartialEq,
-  I: Iterator,
-  I::Item: Borrow<C>,
+  K: RadixKey + ?Sized + 'k,
+  I: Iterator<Item = K::Component<'k>>,
 {
   let mut shared = 0;
   for c in label {
     match key.peek() {
-      Some(item) if c == item.borrow() => {
+      Some(item) if K::compare(c, item.clone()) == Ordering::Equal => {
         shared += 1;
         key.next();
       }
@@ -1697,8 +1724,9 @@ fn seed_lower<'a, P, C, V>(
 
   // `lower` extends strictly below this node, so the node's own value (a proper
   // prefix of `lower`) is below the bound and excluded. Children fall into three
-  // groups by their first component relative to `first`.
-  let idx = node.child_index(first.borrow());
+  // groups by their first component relative to `first`. `first` is a stored owned
+  // component (from the materialized bound), so this is a stored-vs-stored search.
+  let idx = node.child_index(first);
   let gt_start = match idx {
     Ok(i) => i + 1,
     Err(i) => i,
@@ -1731,7 +1759,7 @@ fn seed_lower<'a, P, C, V>(
         node: &edge.child,
         key: child_key,
       });
-    } else if Borrow::<C>::borrow(&suffix[shared]) < Borrow::<C>::borrow(&edge.label[shared]) {
+    } else if suffix[shared] < edge.label[shared] {
       // The edge diverges above `lower`: the whole subtree exceeds it — include it.
       stack.push(RangeFrame::Node {
         node: &edge.child,
@@ -1777,7 +1805,7 @@ fn seed_upper<'a, P, C, V>(
       value,
     });
   }
-  let idx = node.child_index(first.borrow());
+  let idx = node.child_index(first);
   let lt_end = match idx {
     Ok(i) => i,
     Err(i) => i,
@@ -1807,7 +1835,7 @@ fn seed_upper<'a, P, C, V>(
     } else if shared == suffix.len() {
       // `upper` runs out mid-edge: it is a proper prefix of every key in this
       // subtree, so all of them strictly exceed it — exclude the whole subtree.
-    } else if Borrow::<C>::borrow(&suffix[shared]) > Borrow::<C>::borrow(&edge.label[shared]) {
+    } else if suffix[shared] > edge.label[shared] {
       // The edge diverges below `upper`: the whole subtree is below it — include it.
       stack.push(RangeFrame::Node {
         node: &edge.child,
