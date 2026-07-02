@@ -23,7 +23,7 @@ use std::vec::Vec;
 use core::{cmp::Ordering, ops::Bound};
 
 use archery::{SharedPointer, SharedPointerKind};
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 
 use crate::RadixKey;
 
@@ -33,22 +33,16 @@ use crate::RadixKey;
 /// inline without bloating a node with rarely-filled slots.
 const LABEL_INLINE: usize = 16;
 
-/// Inline child capacity of a node. A node with at most this many edges keeps them
-/// in its own allocation; a higher-fanout node spills to the heap. Kept at one:
-/// single-child chain nodes (common under path compression) then hold their edge
-/// inline, while every extra inline slot enlarges *every* node and measurably slows
-/// full-trie iteration — so wider nodes are left on the heap.
-const CHILDREN_INLINE: usize = 1;
-
 /// A path-compressed edge label: inline for the short common case (see
 /// [`LABEL_INLINE`]), heap-backed once it spills. Derefs to `[C]`, so every
 /// slice-based walk (`match_prefix`, `common_len`, indexing, `split_at`) is unchanged.
 pub(crate) type Label<C> = SmallVec<[C; LABEL_INLINE]>;
 
-/// A node's sorted child edges: inline for the low-fanout common case (see
-/// [`CHILDREN_INLINE`]), heap-backed once it spills. Derefs to `[Edge<..>]`, so
-/// `binary_search`, range, and iteration go through the slice unchanged.
-pub(crate) type Children<P, C, V> = SmallVec<[Edge<P, C, V>; CHILDREN_INLINE]>;
+/// A node's sorted child edges. A plain `Vec`, not an inline-capacity `SmallVec`:
+/// an inline slot enlarges *every* node and puts a spilled-or-inline branch in
+/// front of each child access, which measurably slows full-trie iteration and the
+/// descent loops.
+pub(crate) type Children<P, C, V> = Vec<Edge<P, C, V>>;
 
 /// A subtree root paired with its reconstructed key, as returned by
 /// [`Node::prefix_seed`].
@@ -132,9 +126,7 @@ where
   pub(crate) const fn new() -> Self {
     Self {
       value: None,
-      // `SmallVec::new_const` is `const` (as is `Event::new()`), so the node
-      // constructor stays `const`.
-      children: SmallVec::new_const(),
+      children: Vec::new(),
       #[cfg(feature = "watch")]
       watch: WatchSlot::new(),
     }
@@ -651,7 +643,7 @@ where
         let label: Label<C> = key.map(K::to_owned).collect();
         let leaf = Node {
           value: Some(value),
-          children: SmallVec::new(),
+          children: Vec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         };
@@ -695,7 +687,7 @@ where
       // The new key ends exactly at the split point: value lives on `mid`.
       Node {
         value: Some(value),
-        children: smallvec![old_child_edge],
+        children: std::vec![old_child_edge],
         #[cfg(feature = "watch")]
         watch: WatchSlot::new(),
       }
@@ -706,7 +698,7 @@ where
         label: key_rest,
         child: SharedPointer::new(Node {
           value: Some(value),
-          children: SmallVec::new(),
+          children: Vec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }),
@@ -714,14 +706,14 @@ where
       if new_leaf.label[0] < old_child_edge.label[0] {
         Node {
           value: None,
-          children: smallvec![new_leaf, old_child_edge],
+          children: std::vec![new_leaf, old_child_edge],
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }
       } else {
         Node {
           value: None,
-          children: smallvec![old_child_edge, new_leaf],
+          children: std::vec![old_child_edge, new_leaf],
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }
