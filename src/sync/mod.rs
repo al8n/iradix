@@ -772,7 +772,7 @@ where
   where
     K: RadixKey<Owned = C> + ?Sized,
   {
-    self.working.remove::<K, _, _>(|| key.components())
+    self.working.remove::<K, _>(key.components())
   }
 
   /// Removes every *strict* descendant of `key` (the value at `key`, if any, is

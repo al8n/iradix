@@ -18,17 +18,54 @@
 //! unwinding) and allocation failure (it aborts via the alloc-error handler, not an
 //! unwind), so neither can corrupt the trie by returning mid-operation.
 
-use std::{boxed::Box, vec, vec::Vec};
+use std::vec::Vec;
 
 use core::{cmp::Ordering, ops::Bound};
 
 use archery::{SharedPointer, SharedPointerKind};
+use smallvec::SmallVec;
 
 use crate::RadixKey;
+
+/// Inline component capacity of an edge label. A path-compressed label at or under
+/// this length lives in the parent node's allocation with no separate heap buffer;
+/// a longer label spills to the heap. Chosen so the common short radix labels stay
+/// inline without bloating a node with rarely-filled slots.
+const LABEL_INLINE: usize = 16;
+
+/// Fanout above which a node keeps a packed first-component index (see
+/// [`Node::firsts`]). At or under it, binary-searching the edges directly touches
+/// only a cache line or two anyway, so the index would buy nothing — skipping it
+/// keeps the common small node leaner and its copy-on-write clone free of the
+/// index allocation.
+const FIRSTS_THRESHOLD: usize = 8;
+
+/// A path-compressed edge label: inline for the short common case (see
+/// [`LABEL_INLINE`]), heap-backed once it spills. Derefs to `[C]`, so every
+/// slice-based walk (`match_prefix`, `common_len`, indexing, `split_at`) is unchanged.
+pub(crate) type Label<C> = SmallVec<[C; LABEL_INLINE]>;
+
+/// A node's sorted child edges. A plain `Vec`, not an inline-capacity `SmallVec`:
+/// an inline slot enlarges *every* node and puts a spilled-or-inline branch in
+/// front of each child access, which measurably slows full-trie iteration and the
+/// descent loops.
+pub(crate) type Children<P, C, V> = Vec<Edge<P, C, V>>;
 
 /// A subtree root paired with its reconstructed key, as returned by
 /// [`Node::prefix_seed`].
 type PrefixRoot<'a, P, C, V> = (&'a Node<P, C, V>, Vec<C>);
+
+/// How a node's `firsts` index must change for a child insertion, as computed by
+/// [`Node::firsts_with_inserted`] ahead of the children splice: unchanged (fanout
+/// stays under the threshold), replaced by a freshly built index (the insert
+/// crosses the threshold), or spliced in place with one component (already
+/// indexed). Applying it after the splice needs only moves and abort-on-OOM
+/// allocation, keeping the fallible work ahead of the irreversible mutation.
+enum FirstsUpdate<C> {
+  Keep,
+  Build(Vec<C>),
+  Splice(C),
+}
 
 #[cfg(feature = "watch")]
 pub(crate) use watch::WatchSlot;
@@ -45,7 +82,7 @@ pub(crate) struct Edge<P, C, V>
 where
   P: SharedPointerKind,
 {
-  pub(crate) label: Box<[C]>,
+  pub(crate) label: Label<C>,
   pub(crate) child: SharedPointer<Node<P, C, V>, P>,
 }
 
@@ -73,7 +110,18 @@ where
   P: SharedPointerKind,
 {
   pub(crate) value: Option<V>,
-  pub(crate) children: Vec<Edge<P, C, V>>,
+  pub(crate) children: Children<P, C, V>,
+  /// The packed first components of the child edges — a dense array the child
+  /// search scans instead of striding across the full `Edge` structs and
+  /// dereferencing a label per probe — kept only where that pays.
+  ///
+  /// Invariant: empty iff `children.len() <= FIRSTS_THRESHOLD` (small nodes
+  /// search their edges directly, and their copy-on-write clones allocate
+  /// nothing here); otherwise `firsts.len() == children.len()` with
+  /// `firsts[i] == children[i].label[0]`. Every child mutation maintains this,
+  /// so the search may trust it unconditionally. A `Vec`, so the wide-node
+  /// splices amortize their growth instead of reallocating per insert.
+  pub(crate) firsts: Vec<C>,
   /// This version's change channel. A copy-on-write clone makes a *fresh* slot (a
   /// new version is a new channel); the old node keeps its own, fired when the
   /// publish-time structural diff sees it replaced.
@@ -92,6 +140,7 @@ where
     Self {
       value: self.value.clone(),
       children: self.children.clone(),
+      firsts: self.firsts.clone(),
       // A COW clone is a new version of this node, so it gets a fresh change
       // channel; the original keeps its own, fired when a publish replaces it.
       #[cfg(feature = "watch")]
@@ -109,7 +158,7 @@ where
     Self {
       value: None,
       children: Vec::new(),
-      // `Event::new()` is `const`, so the node constructor stays `const`.
+      firsts: Vec::new(),
       #[cfg(feature = "watch")]
       watch: WatchSlot::new(),
     }
@@ -124,12 +173,90 @@ where
     total
   }
 
-  /// Checks the canonical (path-compressed) invariants for a subtree rooted here:
-  /// no edge label is empty, and no non-root node is a redundant valueless
-  /// single-child node. `is_root` exempts the root, which is never merged.
+  /// The structure-only slice of the `firsts` invariant — emptiness, threshold,
+  /// and length agreement. This is what the mutators debug-assert after each
+  /// child mutation: it runs NO user code, because a user `PartialEq` panicking
+  /// inside a post-mutation assertion would fire after the tree changed but
+  /// before the root committed `len`, breaking the strong exception guarantee.
+  /// The full elementwise mirror check is the test-only
+  /// [`firsts_synced`](Self::firsts_synced), reached through `is_canonical`.
+  fn firsts_shape_ok(&self) -> bool {
+    if self.firsts.is_empty() {
+      self.children.len() <= FIRSTS_THRESHOLD
+    } else {
+      self.children.len() > FIRSTS_THRESHOLD && self.firsts.len() == self.children.len()
+    }
+  }
+
+  /// Whether the packed first-component index fully matches `children` (the
+  /// invariant documented on the `firsts` field): the structural shape of
+  /// [`firsts_shape_ok`](Self::firsts_shape_ok) plus the elementwise mirror.
+  /// Test-only — it runs user `PartialEq`, which mutators must never invoke in
+  /// their post-commit assertions.
   #[cfg(test)]
-  pub(crate) fn is_canonical(&self, is_root: bool) -> bool {
+  fn firsts_synced(&self) -> bool
+  where
+    C: PartialEq,
+  {
+    self.firsts_shape_ok()
+      && (self.firsts.is_empty()
+        || core::iter::zip(&self.firsts, &self.children)
+          .all(|(first, edge)| edge.label.first() == Some(first)))
+  }
+
+  /// The `firsts` change required for inserting at `i` an edge whose label
+  /// begins with `first`, computed *before* the children splice so that every
+  /// user-`Clone`-capable step — cloning a first component, and on a threshold
+  /// crossing the full build from the edges — precedes the irreversible mutation
+  /// (the mutator panic-safety contract). The caller applies the result after
+  /// the splice with only moves and abort-on-OOM allocation.
+  fn firsts_with_inserted(&self, i: usize, first: C) -> FirstsUpdate<C>
+  where
+    C: Clone,
+  {
+    let new_len = self.children.len() + 1;
+    if new_len <= FIRSTS_THRESHOLD {
+      return FirstsUpdate::Keep;
+    }
+    if self.firsts.is_empty() {
+      // Crossing the threshold: build the index from the edges, with the new
+      // component already in place.
+      let mut packed = Vec::with_capacity(new_len);
+      packed.extend(self.children[..i].iter().map(|edge| edge.label[0].clone()));
+      packed.push(first);
+      packed.extend(self.children[i..].iter().map(|edge| edge.label[0].clone()));
+      FirstsUpdate::Build(packed)
+    } else {
+      FirstsUpdate::Splice(first)
+    }
+  }
+
+  /// Restores the `firsts` invariant after the child edge at `i` was removed:
+  /// empties the index once the fanout is back at or under [`FIRSTS_THRESHOLD`],
+  /// otherwise closes the gap by MOVING the survivors. No `C` clone, no fresh
+  /// allocation, and no user code runs here, so it is safe in the post-commit
+  /// no-unwind zone shared with [`normalize_child`].
+  fn firsts_remove(&mut self, i: usize) {
+    if self.children.len() <= FIRSTS_THRESHOLD {
+      self.firsts.clear();
+    } else if !self.firsts.is_empty() {
+      self.firsts.remove(i);
+    }
+  }
+
+  /// Checks the canonical (path-compressed) invariants for a subtree rooted here:
+  /// no edge label is empty, the first-component mirror is in sync, and no
+  /// non-root node is a redundant valueless single-child node. `is_root` exempts
+  /// the root, which is never merged.
+  #[cfg(test)]
+  pub(crate) fn is_canonical(&self, is_root: bool) -> bool
+  where
+    C: PartialEq,
+  {
     if !is_root && self.value.is_none() && self.children.len() == 1 {
+      return false;
+    }
+    if !self.firsts_synced() {
       return false;
     }
     for edge in &self.children {
@@ -146,23 +273,30 @@ where
   C: Ord,
   P: SharedPointerKind,
 {
-  /// Binary-searches children for the edge whose label begins with a stored `first`
-  /// component (stored-vs-stored, via `C: Ord`).
+  /// Binary-searches for the edge whose label begins with a stored `first`
+  /// component (stored-vs-stored, via `C: Ord`) — through the packed
+  /// first-component index where one exists (wide nodes), directly over the few
+  /// edges otherwise.
   ///
   /// `Ok(i)` indexes the matching edge; `Err(i)` is the insertion point that
   /// keeps `children` sorted by first component. Used by the ordered / seed paths,
   /// where the query component is already an owned `C`.
   #[inline]
   pub(crate) fn child_index(&self, first: &C) -> Result<usize, usize> {
-    self
-      .children
-      .binary_search_by(|edge| edge.label[0].cmp(first))
+    if self.firsts.is_empty() {
+      self
+        .children
+        .binary_search_by(|edge| edge.label[0].cmp(first))
+    } else {
+      self.firsts.binary_search(first)
+    }
   }
 
-  /// Binary-searches children for the edge whose label begins with a **walked**
-  /// component, comparing a stored owned first component against the walked one via
-  /// [`K::compare`](RadixKey::compare) — the descent step (`first` borrows from the
-  /// key being looked up, and `K::Owned == C`).
+  /// Binary-searches for the edge whose label begins with a **walked** component,
+  /// comparing a stored owned first component against the walked one via
+  /// [`K::compare`](RadixKey::compare) — the descent step (`first` borrows from
+  /// the key being looked up, and `K::Owned == C`). Uses the packed
+  /// first-component index where one exists, the edges directly otherwise.
   ///
   /// `Ok(i)` indexes the matching edge; `Err(i)` is the insertion point. Consistent
   /// with [`child_index`](Self::child_index) because `compare` agrees with `Owned: Ord`.
@@ -171,9 +305,15 @@ where
   where
     K: RadixKey<Owned = C> + ?Sized,
   {
-    self
-      .children
-      .binary_search_by(|edge| K::compare(&edge.label[0], first.clone()))
+    if self.firsts.is_empty() {
+      self
+        .children
+        .binary_search_by(|edge| K::compare(&edge.label[0], first.clone()))
+    } else {
+      self
+        .firsts
+        .binary_search_by(|stored| K::compare(stored, first.clone()))
+    }
   }
 
   /// Returns a reference to the value stored at exactly the components yielded by
@@ -191,8 +331,10 @@ where
       };
       let i = node.child_index_cmp::<K>(first.clone()).ok()?;
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared != edge.label.len() {
+      // One label deref per level: the walk below reuses the slice.
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared != label.len() {
         return None;
       }
       node = &edge.child;
@@ -223,8 +365,9 @@ where
         return deepest;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared != edge.label.len() {
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared != label.len() {
         // diverged inside this edge: nothing deeper can match
         return deepest;
       }
@@ -251,8 +394,9 @@ where
         break;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared != edge.label.len() {
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared != label.len() {
         break;
       }
       node = &edge.child;
@@ -282,11 +426,12 @@ where
         break;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared != edge.label.len() {
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared != label.len() {
         break;
       }
-      extend_key::<C>(&mut acc, &edge.label);
+      extend_key::<C>(&mut acc, label);
       node = &edge.child;
     }
     found
@@ -331,8 +476,9 @@ where
         return Vec::new();
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared == edge.label.len() {
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared == label.len() {
         node = &edge.child;
       } else if key.peek().is_none() {
         // key ends mid-edge: the whole child subtree is strict descendants.
@@ -468,8 +614,9 @@ where
         return None;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared == edge.label.len() {
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared == label.len() {
         node = &edge.child;
       } else if key.peek().is_none() {
         // `key` ends mid-edge: the whole child subtree carries the prefix.
@@ -529,15 +676,16 @@ where
         return Vec::new();
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared == edge.label.len() {
-        extend_key::<C>(&mut acc, &edge.label);
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared == label.len() {
+        extend_key::<C>(&mut acc, label);
         node = &edge.child;
       } else if key.peek().is_none() {
         // `key` ends mid-edge: the whole child subtree carries the prefix, and its
         // key strictly extends `key`, so inclusive and strict agree here.
         let mut k = dup_key::<C>(&acc);
-        extend_key::<C>(&mut k, &edge.label);
+        extend_key::<C>(&mut k, label);
         return std::vec![(&*edge.child, k)];
       } else {
         return Vec::new();
@@ -620,12 +768,18 @@ where
     let i = match node.child_index_cmp::<K>(first) {
       Err(insert_at) => {
         // No edge begins with `first`: the new leaf's label is the WHOLE remaining
-        // key. Consuming the iterator yields the peeked `first` too. `to_owned` is the
+        // key. Consuming the iterator yields the peeked `first` too. A short label
+        // stays inline (no heap buffer); only a long one spills. `to_owned` is the
         // sole allocation of the key walk (for a `Path`, one `OsString` per component).
-        let label: Box<[C]> = key.map(K::to_owned).collect::<Vec<C>>().into_boxed_slice();
+        let label: Label<C> = key.map(K::to_owned).collect();
+        // The label is never empty here (`key` had a next component). The index
+        // update is computed up front — the last user-panic-capable step — so
+        // everything after it is move-only and an unwind leaves the trie untouched.
+        let update = node.firsts_with_inserted(insert_at, label[0].clone());
         let leaf = Node {
           value: Some(value),
           children: Vec::new(),
+          firsts: Vec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         };
@@ -634,13 +788,21 @@ where
           child: SharedPointer::new(leaf),
         };
         node.children.insert(insert_at, edge);
+        match update {
+          FirstsUpdate::Keep => {}
+          FirstsUpdate::Build(packed) => node.firsts = packed,
+          FirstsUpdate::Splice(first) => node.firsts.insert(insert_at, first),
+        }
+        debug_assert!(node.firsts_shape_ok());
         return None;
       }
       Ok(i) => i,
     };
 
-    let shared = match_prefix::<K, _>(&node.children[i].label, key);
-    let label_len = node.children[i].label.len();
+    let (shared, label_len) = {
+      let label = node.children[i].label.as_slice();
+      (match_prefix::<K, _>(label, key), label.len())
+    };
 
     if shared == label_len {
       // The whole edge label is consumed; descend into the child with the same
@@ -656,20 +818,22 @@ where
     // before anything is detached, so an unwind leaves the trie and `len`
     // untouched. Only the final single move splices `mid` in, dropping the old
     // edge (whose child was already cloned, so no subtree is lost).
-    let key_rest: Vec<C> = key.map(K::to_owned).collect();
+    let key_rest: Label<C> = key.map(K::to_owned).collect();
     let (head, tail) = node.children[i].label.split_at(shared);
-    let head: Box<[C]> = head.to_vec().into_boxed_slice();
-    let tail: Box<[C]> = tail.to_vec().into_boxed_slice();
+    let head: Label<C> = head.iter().cloned().collect();
+    let tail: Label<C> = tail.iter().cloned().collect();
     let old_child_edge = Edge {
       label: tail,
       child: node.children[i].child.clone(),
     };
 
+    // The mid node has at most two children — under the threshold, so no index.
     let mid_node = if key_rest.is_empty() {
       // The new key ends exactly at the split point: value lives on `mid`.
       Node {
         value: Some(value),
-        children: vec![old_child_edge],
+        children: std::vec![old_child_edge],
+        firsts: Vec::new(),
         #[cfg(feature = "watch")]
         watch: WatchSlot::new(),
       }
@@ -677,10 +841,11 @@ where
       // The new key diverges from the old child within this edge: two children in
       // sorted order. The ordering `Ord` is the last fallible step before splicing.
       let new_leaf = Edge {
-        label: key_rest.into_boxed_slice(),
+        label: key_rest,
         child: SharedPointer::new(Node {
           value: Some(value),
           children: Vec::new(),
+          firsts: Vec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }),
@@ -688,71 +853,108 @@ where
       if new_leaf.label[0] < old_child_edge.label[0] {
         Node {
           value: None,
-          children: vec![new_leaf, old_child_edge],
+          children: std::vec![new_leaf, old_child_edge],
+          firsts: Vec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }
       } else {
         Node {
           value: None,
-          children: vec![old_child_edge, new_leaf],
+          children: std::vec![old_child_edge, new_leaf],
+          firsts: Vec::new(),
           #[cfg(feature = "watch")]
           watch: WatchSlot::new(),
         }
       }
     };
 
+    // `head` keeps the original label's first component (`shared >= 1`), so the
+    // packed index (when this node has one) still matches after the splice.
     node.children[i] = Edge {
       label: head,
       child: SharedPointer::new(mid_node),
     };
+    debug_assert!(node.firsts_shape_ok());
     None
   }
 
   /// Removes the value at the components yielded by `key` from the subtree rooted
   /// at `node_ptr`, copying on write and re-compressing. Returns the removed value
-  /// if present.
+  /// if present. The caller adjusts `len` (by one) only when this returns `Some`.
   ///
-  /// `key` is consumed lazily (mirroring [`insert`](Node::insert) and the read
-  /// path): each matched edge label is walked through the same `Peekable`, so no
-  /// whole-key `Vec` is materialized.
+  /// Single lazy descent (no separate existence pass): every miss — a missing edge,
+  /// a mid-edge divergence, or a key ending on a valueless node — is decided on the
+  /// shared node **before** any [`make_mut`](SharedPointer::make_mut), so an absent
+  /// key clones nothing and never disturbs structural sharing. On the found path a
+  /// unique node is edited in place; a shared node is rebuilt lazily bottom-up (the
+  /// [functional persistent-remove pattern]) — recursing into a clone of the child
+  /// pointer (an O(1) refcount bump, not a node copy) and copying this node only once
+  /// a descendant has actually changed. `key` is consumed lazily (mirroring
+  /// [`insert`](Node::insert) and the read path), so no whole-key `Vec` is
+  /// materialized.
+  ///
+  /// Panic safety: on a shared node the rebuilt copies bubble up through owned local
+  /// pointers, and the ONLY write into the live tree is the outermost frame's own
+  /// `make_mut` on `node_ptr` (or, at the root, the caller reassigning `self.root`) —
+  /// which is the last user-`Clone`-capable step, after which only pointer moves and
+  /// the label-MOVING [`normalize_child`] run. So a panicking user `Clone` anywhere on
+  /// the way up unwinds before the live tree is ever mutated, leaving the original
+  /// tree and `len` untouched; the taken value is merely dropped, never returned. The
+  /// caller decrements `len` only on the returned `Some` (which an unwind never
+  /// produces), so `len` is corrected there rather than here.
+  ///
+  /// [functional persistent-remove pattern]: https://en.wikipedia.org/wiki/Persistent_data_structure
   pub(crate) fn remove<'k, K, I>(
     node_ptr: &mut SharedPointer<Node<P, C, V>, P>,
     key: &mut core::iter::Peekable<I>,
-    len: &mut usize,
   ) -> Option<V>
   where
     K: RadixKey<Owned = C> + ?Sized + 'k,
     I: Iterator<Item = K::Component<'k>>,
   {
-    let node = SharedPointer::make_mut(node_ptr);
-
     if key.peek().is_none() {
-      // The value `take` is the single infallible commit point: decrement `len`
-      // here, after the fallible make-mut/traversal above has already succeeded
-      // and before any (fallible) re-compression on the way back up. An unwind
-      // before this point never reaches it, so `len` stays accurate.
-      let removed = node.value.take();
+      // Key ends here: this node is the target. A valueless node is a miss — decided
+      // on the shared node (read-only), so it clones nothing; only a real hit reaches
+      // `make_mut`.
+      node_ptr.value.as_ref()?;
+      return SharedPointer::make_mut(node_ptr).value.take();
+    }
+
+    let first = key.peek().expect("key has a next component").clone();
+    // Locate and match the edge on the SHARED node: a missing edge or a mid-edge
+    // divergence is a miss that clones nothing.
+    let i = node_ptr.child_index_cmp::<K>(first).ok()?;
+    {
+      let label = node_ptr.children[i].label.as_slice();
+      if match_prefix::<K, _>(label, key) != label.len() {
+        return None;
+      }
+    }
+
+    // The edge matches; descend into child `i`. A unique node is edited in place
+    // (no clone, exactly like a non-persistent trie); a shared node defers its copy
+    // until a descendant is known to have changed.
+    if let Some(node) = SharedPointer::get_mut(node_ptr) {
+      let removed = Node::remove::<K, _>(&mut node.children[i].child, key);
       if removed.is_some() {
-        *len -= 1;
+        normalize_child(node, i);
+        debug_assert!(node.firsts_shape_ok());
       }
       return removed;
     }
 
-    let first = key.peek().expect("key has a next component").clone();
-    let i = node.child_index_cmp::<K>(first).ok()?;
-    let shared = match_prefix::<K, _>(&node.children[i].label, key);
-    if shared != node.children[i].label.len() {
-      // The key diverges within this edge (or runs out mid-edge): no exact match
-      // below, so nothing to remove.
-      return None;
-    }
-
-    let removed = Node::remove::<K, _>(&mut node.children[i].child, key, len);
-    if removed.is_some() {
-      normalize_child(node, i);
-    }
-    removed
+    // Shared: recurse into a clone of the child pointer (an O(1) refcount bump, not a
+    // node copy). On a miss below, the clone is dropped and this node is never copied
+    // — so an absent key preserves sharing no matter how deep the divergence is.
+    let mut child = node_ptr.children[i].child.clone();
+    let removed = Node::remove::<K, _>(&mut child, key)?;
+    // A descendant changed: copy this node now and splice the rebuilt child.
+    let node = SharedPointer::make_mut(node_ptr);
+    node.children[i].child = child;
+    normalize_child(node, i);
+    debug_assert!(node.firsts_shape_ok());
+    Some(removed)
   }
 
   /// Unlinks every strict descendant of `key` under `node_ptr`, copying on write
@@ -784,6 +986,7 @@ where
       let removed: usize = node.children.iter().map(|edge| edge.child.count()).sum();
       *len -= removed;
       node.children.clear();
+      node.firsts.clear();
       return removed;
     }
 
@@ -791,8 +994,10 @@ where
     let Ok(i) = node.child_index_cmp::<K>(first) else {
       return 0;
     };
-    let shared = match_prefix::<K, _>(&node.children[i].label, key);
-    let label_len = node.children[i].label.len();
+    let (shared, label_len) = {
+      let label = node.children[i].label.as_slice();
+      (match_prefix::<K, _>(label, key), label.len())
+    };
 
     if shared == label_len {
       // Whole label consumed: recurse (which unlinks and corrects `len` deeper),
@@ -801,6 +1006,7 @@ where
       let removed = Node::unlink_descendants::<K, _>(&mut node.children[i].child, key, len);
       if removed > 0 {
         normalize_child(node, i);
+        debug_assert!(node.firsts_shape_ok());
       }
       removed
     } else if key.peek().is_none() {
@@ -809,6 +1015,8 @@ where
       let removed = node.children[i].child.count();
       *len -= removed;
       node.children.remove(i);
+      node.firsts_remove(i);
+      debug_assert!(node.firsts_shape_ok());
       removed
     } else {
       // `key` diverges from this edge — nothing matches, no change.
@@ -855,8 +1063,10 @@ where
     let Ok(i) = node.child_index_cmp::<K>(first) else {
       return 0;
     };
-    let shared = match_prefix::<K, _>(&node.children[i].label, key);
-    let label_len = node.children[i].label.len();
+    let (shared, label_len) = {
+      let label = node.children[i].label.as_slice();
+      (match_prefix::<K, _>(label, key), label.len())
+    };
 
     if key.peek().is_none() {
       // `key` ends at or within this edge: the whole child subtree is at or below
@@ -870,6 +1080,8 @@ where
       let removed = node.children[i].child.count();
       *len -= removed;
       node.children.remove(i);
+      node.firsts_remove(i);
+      debug_assert!(node.firsts_shape_ok());
       removed
     } else if shared == label_len {
       // Whole label consumed and `key` continues: recurse, then re-canonicalize
@@ -877,6 +1089,7 @@ where
       let removed = Node::unlink_prefix::<K, _>(&mut node.children[i].child, key, len);
       if removed > 0 {
         normalize_child(node, i);
+        debug_assert!(node.firsts_shape_ok());
       }
       removed
     } else {
@@ -1168,31 +1381,25 @@ where
     old
   }
 
-  /// Removes and returns the value at exactly the components yielded by
-  /// `make_key`, if any.
+  /// Removes and returns the value at exactly the components yielded by `key`, if
+  /// any. `key` is walked lazily in a single descent (no whole-key `Vec`).
   ///
-  /// `make_key` is a re-iterable key source called once per pass: a read-only
-  /// existence pass first, then (only when present) the mutate pass. Re-yielding a
-  /// fresh iterator per pass keeps the no-copy-on-absent guarantee while avoiding a
-  /// whole-key `Vec` — both passes walk the key lazily. Correctness relies on the
-  /// [`RadixKey`](crate::RadixKey) determinism contract (each call yields the same
-  /// components); the public wrappers pass `|| key.components()`.
-  pub(crate) fn remove<'k, K, F, I>(&mut self, make_key: F) -> Option<V>
+  /// [`Node::remove`] avoids copy-on-write on an absent key entirely (the miss is
+  /// decided on shared nodes), so a single pass suffices — no separate read-only
+  /// existence pass. `len` is decremented here, only on a real removal, after the
+  /// (fallible) descent has returned: a panicking user `Clone` unwinds without
+  /// producing `Some`, leaving the trie and `len` consistent.
+  pub(crate) fn remove<'k, K, I>(&mut self, key: I) -> Option<V>
   where
     K: RadixKey<Owned = C> + ?Sized + 'k,
-    F: Fn() -> I,
     I: Iterator<Item = K::Component<'k>>,
   {
-    // A read-only existence check first: a remove of an absent key must not
-    // copy-on-write (and so must not disturb structural sharing). When the key
-    // is present, every node on its root-to-value path genuinely changes, so the
-    // eager copy-on-write in `Node::remove` is justified.
-    self.get::<K, _>(make_key())?;
     let root = self.root.as_mut()?;
-    // `Node::remove` decrements `len` at the value-`take` itself — after its
-    // fallible make-mut/traversal succeeds — so a panic in a shared-node clone or
-    // a user comparison on the way down leaves `len` and the trie consistent.
-    Node::remove::<K, _>(root, &mut make_key().peekable(), &mut self.len)
+    let removed = Node::remove::<K, _>(root, &mut key.peekable());
+    if removed.is_some() {
+      self.len -= 1;
+    }
+    removed
   }
 
   /// Removes every *strict* descendant of the components yielded by `make_key`
@@ -1449,6 +1656,7 @@ where
     0 => {
       // Dead end: drop the edge entirely.
       node.children.remove(i);
+      node.firsts_remove(i);
     }
     1 => {
       // Redundant node: splice its single grandchild edge into this edge by
@@ -1463,14 +1671,18 @@ where
       // return value is never dropped by an unwind here.
       let merged_len =
         node.children[i].label.len() + node.children[i].child.children[0].label.len();
-      let mut merged: Vec<C> = Vec::with_capacity(merged_len);
+      let mut merged: Label<C> = SmallVec::with_capacity(merged_len);
       let grandchild_edge = {
         let child = SharedPointer::make_mut(&mut node.children[i].child);
+        // A single-child node is under the threshold, so it carries no packed
+        // index to maintain here.
         child.children.pop().expect("checked exactly one child")
       };
       merged.extend(core::mem::take(&mut node.children[i].label));
       merged.extend(grandchild_edge.label);
-      node.children[i].label = merged.into_boxed_slice();
+      // The merged label starts with the old label's components, so the packed
+      // index (when this node has one) still matches.
+      node.children[i].label = merged;
       node.children[i].child = grandchild_edge.child;
     }
     _ => {}

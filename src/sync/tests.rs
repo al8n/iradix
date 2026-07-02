@@ -1478,6 +1478,12 @@ mod watch {
   #[test]
   #[cfg_attr(miri, ignore = "deep chain is prohibitively slow under miri")]
   fn deep_clear_notifies_without_overflow() {
+    // The giant-stack helper threads (BIG_STACK) are unreliable under sanitizer
+    // runtimes — their shadow mappings cannot host such stacks — and this test
+    // proves the walk is iterative, not thread safety (ci/sanitizer.sh sets this).
+    if std::env::var_os("IRADIX_SANITIZER").is_some() {
+      return;
+    }
     // A deep Some -> None transition (clear the whole trie) fires the removed
     // subtree. `clear`/`commit` do not recurse on depth, so the only node-depth walk
     // is the NOTIFY collect — run it on a small stack to prove it is iterative.
@@ -1507,6 +1513,11 @@ mod watch {
   #[test]
   #[cfg_attr(miri, ignore = "deep chain is prohibitively slow under miri")]
   fn deep_changed_path_notifies() {
+    // Skipped under sanitizer runtimes for the same giant-stack reason as
+    // `deep_clear_notifies_without_overflow`.
+    if std::env::var_os("IRADIX_SANITIZER").is_some() {
+      return;
+    }
     // Changing the DEEPEST value forces the collect Pair walk all the way down the
     // chain; a watch on the deepest key must fire, proving the diff descends to full
     // depth without recursion-driven overflow.

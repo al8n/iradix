@@ -78,8 +78,9 @@ where
         return &node.watch;
       };
       let edge = &node.children[i];
-      let shared = match_prefix::<K, _>(&edge.label, &mut key);
-      if shared == edge.label.len() {
+      let label = edge.label.as_slice();
+      let shared = match_prefix::<K, _>(label, &mut key);
+      if shared == label.len() {
         node = &edge.child;
       } else {
         return &node.watch;
@@ -101,7 +102,7 @@ fn collect_subtree<'a, P, C, V>(
 ) where
   P: SharedPointerKind,
 {
-  let mut stack = vec![node];
+  let mut stack = std::vec![node];
   while let Some(n) = stack.pop() {
     out.push(&n.watch);
     for edge in &n.children {
@@ -154,7 +155,7 @@ pub(crate) fn collect_changed<'a, P, C, V>(
   C: Ord,
   P: SharedPointerKind,
 {
-  let mut stack = vec![Work::Pair(base, work)];
+  let mut stack = std::vec![Work::Pair(base, work)];
   drive(&mut stack, out);
 }
 

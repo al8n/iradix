@@ -3,6 +3,12 @@ set -ex
 
 export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
 
+# The deep-chain recursion-depth stress tests spawn giant-stack helper threads,
+# which sanitizer runtimes cannot reliably host (their shadow mappings do not
+# cover such stacks); the tests skip themselves when this is set. They prove
+# walk iterativeness, not thread safety, so the sanitizers lose no coverage.
+export IRADIX_SANITIZER=1
+
 TARGET="x86_64-unknown-linux-gnu"
 
 # Run address sanitizer

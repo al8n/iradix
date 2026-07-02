@@ -23,6 +23,10 @@ triomphe = ["dep:triomphe", "archery/triomphe"]
 
 [dependencies]
 archery = { version = "1", default-features = false }
+smallvec = { version = "1", default-features = false, features = [
+  "const_new",
+  "union",
+] }
 event-listener = { version = "5", optional = true, default-features = false }
 agnostic-lite = { version = "0.6", optional = true, default-features = false, features = [
   "time",
@@ -37,6 +41,13 @@ pollster = "0.4"
 agnostic-lite = { version = "0.6", features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 
+# Benchmark harness and comparison targets (see `benches/comparison.rs`).
+criterion = "0.8"
+radix_trie = "0.3"
+patricia_tree = "0.10"
+qp-trie = "0.8"
+im = "15"
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -50,6 +61,10 @@ incremental = false
 debug-assertions = false
 overflow-checks = false
 rpath = false
+
+[[bench]]
+name = "comparison"
+harness = false
 
 [[example]]
 name = "watch"

@@ -41,6 +41,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   yield and store `char`; `CStr` / `CString` / `OsStr` / `OsString` yield `&u8` /
   store `u8`; the integer types yield `u8` by value / store `u8` (same big-endian,
   order-preserving-within-one-type encoding).
+- **Node layout: inline short edge labels.** An edge's path-compressed label is
+  now stored inline in its parent node when short (up to 16 components), spilling
+  to the heap only past that — removing the per-edge heap buffer that every
+  copy-on-write node clone previously paid. Snapshot-then-insert on low-shared-prefix
+  keys drops ~64%.
+- **Adaptive packed first-component index.** A node wider than 8 children keeps a
+  dense array mirroring each edge's first component, so the descent binary-search
+  scans packed components instead of striding over edges; narrow nodes search the
+  edges directly and clone with no extra allocation. Lookups drop 10–48% across the
+  comparison workloads.
+- **Single-pass `remove`.** `remove` no longer walks the key twice (a read-only
+  existence check and then a mutating descent): one lazy-copy descent mutates
+  uniquely-owned nodes in place, copies only genuinely shared path nodes on the
+  found path, and a miss still clones nothing. Removals drop 20–46%. The strong
+  exception guarantee is unchanged (`len` and the structural splice commit at the
+  root, after all user code has run), and mutator debug assertions run no user
+  code.
+
+### Added
+
+- **Comparison benchmark suite** (`benches/comparison.rs`) against `radix_trie`,
+  `patricia_tree`, `qp-trie`, `im::OrdMap`, and `BTreeMap` — six operation groups
+  over random and path-like keysets, with results and methodology in
+  [`benches/README.md`](benches/README.md).
+- `smallvec` dependency (internal only — the inline label representation; no
+  public-API change).
 
 ## [0.2.2]
 
