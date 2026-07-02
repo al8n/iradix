@@ -6,6 +6,42 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Changed
+
+- **BREAKING — `RadixKey` redesign for allocation-free walks.** The trait now
+  distinguishes the **borrowed** component yielded while walking a key from the
+  **owned** component the trie stores, so a walk (every lookup, ancestor/descendant
+  query, and removal) borrows straight from the key and allocates *nothing* — only
+  `insert` turns a walked component into its owned form. The old single
+  `type Component` plus `fn components(&self) -> impl Iterator<Item: Borrow<Component>>`
+  is replaced by:
+  - `type Component<'a>: Clone` — the zero-copy borrowed component yielded by the walk;
+  - `type Owned: Ord + Clone` — the owned component the trie stores (this is the trie's
+    `C`; a `Radix<C, V>` method bound is now `RadixKey<Owned = C>`, was
+    `RadixKey<Component = C>`);
+  - `type Iter<'a>: Iterator<Item = Component<'a>>` — the nameable walk iterator;
+  - `fn components(&self) -> Self::Iter<'_>`;
+  - `fn to_owned(c: Self::Component<'_>) -> Self::Owned` — used only on the `insert`
+    path (the sole allocation of the key walk);
+  - `fn compare(owned: &Self::Owned, walked: Self::Component<'_>) -> Ordering` — the
+    descent step, comparing a stored owned component against a walked borrowed one; it
+    must agree with `Owned: Ord`.
+- **`Path` / `PathBuf` walks are now allocation-free.** Previously `Path`/`PathBuf`
+  decomposed to an owned `OsString` per component *on every walk* (including reads);
+  now the walk yields borrowed `std::path::Component`s (`Component<'a> =
+  std::path::Component<'a>`, `Iter<'a> = std::path::Components<'a>`) and only `insert`
+  allocates — one `OsString` (`Owned = OsString`) per **stored** component, never on a
+  read. `compare` bridges a stored `OsString` and a walked `Component` through their
+  common `OsStr`. `Path::components` normalization semantics are unchanged (a leading
+  `.` and any `..` are preserved). A `Path`-keyed trie is still `Radix<OsString, V>`.
+- All built-in impls migrated to the new shape, preserving their exact semantics: slice
+  keys (`[C]`, `Vec<C>`, `[C; N]`, `Box<[C]>`) yield `&C` / store `C`; `str` / `String`
+  yield and store `char`; `CStr` / `CString` / `OsStr` / `OsString` yield `&u8` /
+  store `u8`; the integer types yield `u8` by value / store `u8` (same big-endian,
+  order-preserving-within-one-type encoding).
+
 ## [0.2.2]
 
 ### Added

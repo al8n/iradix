@@ -1,13 +1,14 @@
 use super::*;
-use core::borrow::Borrow;
 use std::{boxed::Box, string::String, vec, vec::Vec};
 
-fn collect<K>(key: &K) -> Vec<K::Component>
+/// Walks `key` and turns each borrowed component into its owned form via
+/// [`RadixKey::to_owned`] — the same shape the trie uses on `insert` — collecting the
+/// owned components in walk order.
+fn collect<K>(key: &K) -> Vec<K::Owned>
 where
   K: RadixKey + ?Sized,
-  K::Component: Clone,
 {
-  key.components().map(|c| c.borrow().clone()).collect()
+  key.components().map(K::to_owned).collect()
 }
 
 #[test]
@@ -144,4 +145,60 @@ fn path_leading_dot_and_parent_dir_are_preserved() {
   // ".." is preserved as a ParentDir component (never resolved).
   assert_eq!(collect(Path::new("a/../b")).len(), 3); // a, "..", b
   assert_ne!(collect(Path::new("a/../b")), collect(Path::new("b")));
+}
+
+#[test]
+fn walk_is_borrowed_and_to_owned_matches_compare() {
+  // The walk yields borrowed components; `to_owned` produces the stored form, and
+  // `compare(&to_owned(c), c)` must be `Equal` (the Consistency contract) for every
+  // component. Check it component-by-component for a slice key (borrowed `&C`).
+  let key: &[u8] = b"abc";
+  for c in key.components() {
+    let owned = <[u8] as RadixKey>::to_owned(c);
+    assert_eq!(
+      <[u8] as RadixKey>::compare(&owned, c),
+      core::cmp::Ordering::Equal
+    );
+  }
+  // `compare` orders a stored owned component against a walked one the same way
+  // `Owned: Ord` orders two stored components.
+  assert_eq!(
+    <[u8] as RadixKey>::compare(&1u8, &2u8),
+    core::cmp::Ordering::Less
+  );
+  assert_eq!(
+    <[u8] as RadixKey>::compare(&2u8, &1u8),
+    core::cmp::Ordering::Greater
+  );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn path_walk_yields_borrowed_components_and_compare_bridges_osstr() {
+  use core::cmp::Ordering;
+  use std::{
+    ffi::OsString,
+    path::{Component, Path},
+  };
+
+  // `<Path as RadixKey>::Component<'_>` is a *borrowed* `std::path::Component` — the
+  // walk is allocation-free; nothing is turned into an `OsString` until `to_owned`.
+  let path = Path::new("a/b");
+  let walked: Vec<Component<'_>> = path.components().collect();
+  assert_eq!(walked.len(), 2);
+
+  // `to_owned` is the sole allocation (the stored `OsString`), and `compare` bridges a
+  // stored `OsString` against a walked `Component` through their common `OsStr`, so it
+  // agrees with `OsString`'s `Ord` (stored-vs-stored) on the same components.
+  for c in path.components() {
+    let owned: OsString = <Path as RadixKey>::to_owned(c);
+    assert_eq!(<Path as RadixKey>::compare(&owned, c), Ordering::Equal);
+  }
+  let a: OsString = <Path as RadixKey>::to_owned(Path::new("a").components().next().unwrap());
+  let b_component = Path::new("b").components().next().unwrap();
+  assert_eq!(
+    <Path as RadixKey>::compare(&a, b_component),
+    a.cmp(&b_component.as_os_str().to_os_string())
+  );
+  assert_eq!(<Path as RadixKey>::compare(&a, b_component), Ordering::Less);
 }

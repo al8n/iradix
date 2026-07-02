@@ -338,7 +338,7 @@ where
   #[inline]
   pub fn watch<K>(&self, key: &K) -> Watch
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     self.watch_at(key)
   }
@@ -348,7 +348,7 @@ where
   #[inline]
   pub fn watch_prefix<K>(&self, prefix: &K) -> Watch
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     self.watch_at(prefix)
   }
@@ -361,7 +361,7 @@ where
   #[inline]
   pub fn get_watch<K>(&self, key: &K) -> (Option<&V>, Watch)
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
     (self.get(key), self.watch_at(key))
   }
@@ -369,9 +369,9 @@ where
   #[inline]
   fn watch_at<K>(&self, key: &K) -> Watch
   where
-    K: RadixKey<Component = C> + ?Sized,
+    K: RadixKey<Owned = C> + ?Sized,
   {
-    let (listener, already) = match self.inner.watch_slot(key.components()) {
+    let (listener, already) = match self.inner.watch_slot::<K, _>(key.components()) {
       Some(slot) => slot.listen(),
       None => self.empty.listen(),
     };
