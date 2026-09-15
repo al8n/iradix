@@ -1,14 +1,27 @@
-# Coverage reporting is advisory: the checks post a coverage delta but never fail a
-# PR. Benchmarks and their comparison harness are not coverage-relevant, so they are
-# excluded from the measured base.
-coverage:
-  status:
-    project:
-      default:
-        informational: true
-    patch:
-      default:
-        informational: true
+codecov:
+  require_ci_to_pass: false
 
 ignore:
-  - "benches"
+  - tests/*
+  - examples/*
+  - benches/*
+  - "**/*/tests.rs"
+
+coverage:
+  status:
+    project: # Overall project status
+      default:
+        target: auto
+        if_not_found: success
+        only_pulls: false
+    patch: # Status for the patch in pull requests
+      default:
+        target: auto
+        if_not_found: success
+        only_pulls: true
+    changes: false # Whether to comment on the coverage changes in pull requests
+
+comment:
+  layout: "header, diff, files, footer"
+  behavior: default
+  require_changes: false

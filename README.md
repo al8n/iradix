@@ -105,14 +105,14 @@ dependency on any of it: it is a plain, reusable container.
 
 ```toml
 [dependencies]
-iradix = "0.2"
+iradix = "0.3"
 ```
 
 For `no_std` (heap required):
 
 ```toml
 [dependencies]
-iradix = { version = "0.2", default-features = false, features = ["alloc"] }
+iradix = { version = "0.3", default-features = false, features = ["alloc"] }
 ```
 
 ## Examples
